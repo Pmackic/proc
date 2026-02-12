@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "g1_block_map": {
+    "L,L,F,H": 10,
+    "L,M,F,H": 10,
+    "M,M,F,H": 25,
+    "H,M,F,H": 25,
+    "M,H,N,L": 50
+  },
+  "g2_check_map": {
+    "L,L,F,H": [2, 5],
+    "L,M,F,H": [2, 5],
+    "M,M,F,H": [4, 8],
+    "M,M,N,L": [6, 14],
+    "H,H,N,L": [8, 16]
+  },
+  "g3_tightening": "mild",
+  "g4_classifier": "balanced",
+  "g5_recovery_routing": "trigger",
+  "g6_enforce_near_reward": true,
+  "g7_artifact": "5bullets",
+  "g8_replan_threshold": 1,
+  "g9_pause_policy": "soft",
+  "g10_explore": "low"
+}

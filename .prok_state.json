@@ -1,0 +1,168 @@
+{
+  "tasks": [
+    {
+      "id": "task-1",
+      "domain": "general",
+      "name": "general",
+      "deadline": null,
+      "total_minutes": 0,
+      "remaining_minutes": 0,
+      "tmt_bins": {
+        "E": "M",
+        "V": "M",
+        "D": "N",
+        "G": "L"
+      },
+      "recent_drift_count": 0
+    },
+    {
+      "id": "bio-ch3-3956",
+      "domain": "skola",
+      "name": "bio ch3",
+      "deadline": "2026-04-11",
+      "total_minutes": 1200,
+      "remaining_minutes": 1200,
+      "tmt_bins": {
+        "E": "M",
+        "V": "M",
+        "D": "N",
+        "G": "L"
+      },
+      "recent_drift_count": 0
+    },
+    {
+      "id": "report-9826",
+      "domain": "work",
+      "name": "report",
+      "deadline": "2026-03-01",
+      "total_minutes": 360,
+      "remaining_minutes": 360,
+      "tmt_bins": {
+        "E": "M",
+        "V": "M",
+        "D": "N",
+        "G": "L"
+      },
+      "recent_drift_count": 0
+    },
+    {
+      "id": "mat-9601",
+      "domain": "skola",
+      "name": "MAT",
+      "deadline": "2026-03-12",
+      "total_minutes": 600,
+      "remaining_minutes": 600,
+      "tmt_bins": {
+        "E": "M",
+        "V": "M",
+        "D": "N",
+        "G": "L"
+      },
+      "recent_drift_count": 0
+    },
+    {
+      "id": "fiz-2867",
+      "domain": "skola",
+      "name": "fiz",
+      "deadline": "2026-04-12",
+      "total_minutes": 960,
+      "remaining_minutes": 960,
+      "tmt_bins": {
+        "E": "M",
+        "V": "M",
+        "D": "N",
+        "G": "L"
+      },
+      "recent_drift_count": 0
+    }
+  ],
+  "active_task_id": "fiz-2867",
+  "plan_block_min": 50,
+  "tiny_min": 10,
+  "day_start": "08:00",
+  "day_end": "22:00",
+  "max_blocks_per_day": 6,
+  "weekly_blackouts": [],
+  "date_blackouts": [],
+  "daterange_blackouts": [],
+  "today_min_done": false,
+  "last_min_date": "2026-02-12",
+  "streak": 2,
+  "last_streak_date": "2026-02-05",
+  "genome": {
+    "version": 2,
+    "g1_block_map": {
+      "L,L,F,H": 10,
+      "L,M,F,H": 10,
+      "M,M,F,H": 25,
+      "H,M,F,H": 25,
+      "M,H,N,L": 50
+    },
+    "g2_check_map": {
+      "L,L,F,H": [
+        2,
+        5
+      ],
+      "L,M,F,H": [
+        2,
+        5
+      ],
+      "M,M,F,H": [
+        4,
+        8
+      ],
+      "M,M,N,L": [
+        6,
+        14
+      ],
+      "H,H,N,L": [
+        8,
+        16
+      ]
+    },
+    "g3_tightening": "mild",
+    "g4_classifier": "balanced",
+    "g5_recovery_routing": "trigger",
+    "g6_enforce_near_reward": true,
+    "g7_artifact": "5bullets",
+    "g8_replan_threshold": 1,
+    "g9_pause_policy": "soft",
+    "g10_explore": "off"
+  },
+  "fitness_path": null,
+  "domains": {},
+  "participant_id": "P001",
+  "study_mode": true,
+  "goal_profile": {
+    "tiers": [
+      [
+        "feasible"
+      ],
+      [
+        "recover_fast"
+      ],
+      [
+        "streak_up"
+      ]
+    ],
+    "annoyance_max_checks": 999,
+    "policy_notes": ""
+  },
+  "language_pack": {
+    "state.engaged": "engaged",
+    "state.drift": "drifting",
+    "state.procrastinate": "procrastinating",
+    "state.blocked": "blocked",
+    "state.paused": "paused",
+    "prompt.check": "CHECK",
+    "prompt.you_can_report": "You can report anytime: d=drift, p=procrastinate, b=blocked(pause), r=resume, q=quit, c=check-now",
+    "trigger.confusion": "confusion",
+    "trigger.boredom": "boredom",
+    "trigger.distraction": "distraction",
+    "trigger.anxiety": "anxiety",
+    "trigger.fatigue": "fatigue",
+    "trigger.other": "other"
+  },
+  "use_cca": false,
+  "cca_model_path": null
+}

@@ -1,0 +1,10 @@
+require slack != neg
+
+priority 1:
+  avoid procrastinating
+  avoid (intent_gap and expected_cost)
+
+priority 2:
+  prefer recover_fast
+  prefer reward_near
+  avoid annoying
