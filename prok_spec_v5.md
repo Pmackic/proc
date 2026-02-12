@@ -307,6 +307,28 @@ Each f_{i,z} is a small table learned from outcomes.
 
 ---
 
+### 10.5 Homeostat DSL (discrete)
+Homeostat rules are expressed over **discrete bins** of essential variables (no continuous math). The DSL *defines acceptable states* and can **veto** bad states.
+
+Default bins:
+- slack: neg | low | ok | high
+- progress: down | flat | up | surge
+- recovery: slow | ok | fast | instant
+- annoyance: high | med | low | none
+- drift: high | med | low | none
+- stability: fragile | wobbly | steady | stable
+
+Rules:
+- `require` = **hard veto** (candidates violating are excluded if any candidates satisfy it)
+- `penalty` = soft cost (higher is worse)
+- `prefer` = soft bonus (lower is better)
+
+Integration:
+- The homeostat score is applied **before** fitness-DSL ranking.
+- NK exploration minimizes homeostat violations/penalties when selecting genomes.
+
+---
+
 ## 11) Fitness: measurable + user-definable (DSL + goal profile)
 
 ### 11.1 Measurable outcome features from logs

@@ -1,0 +1,10 @@
+require slack != neg
+require recovery != slow
+
+penalty 2: annoyance = high
+penalty 1: drift = high
+penalty 1: progress = down
+
+prefer 1: slack in {ok, high}
+prefer 1: recovery in {fast, instant}
+prefer 1: stability in {steady, stable}
