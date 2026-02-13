@@ -55,6 +55,17 @@ PROK v5 implements an Ashby regulator loop:
 - **Regulator**: selects transforms 𝒜 and adapts policy “genes” over time
 - **Goal/fitness model ρ**: user priorities affect action ranking (without changing the core measurable outcomes)
 
+### Three-layer architecture (big-picture framing)
+PROK v5 should be analyzed as three coupled layers:
+1) **Control core**: feasibility preservation via slack, replanning, and alarm channel  
+2) **Policy layer**: fitness DSL + goal profile ρ (explicit ranking of acceptable actions)  
+3) **Phenomenology layer**: signature-based homology memory that transfers empirically successful recoveries across structurally similar episodes
+
+This decomposition is methodologically important:
+- adaptation can improve without introducing opaque end-to-end models
+- safety is constrained by policy envelopes (phenomenology re-ranks within admissible candidates)
+- all layers remain auditable in local state/log artifacts
+
 v5 adds **task-level** and **domain-level** essential variables:
 - per-task slack (capacity until deadline − remaining blocks)
 - per-task completion and recovery outcomes
@@ -216,6 +227,16 @@ Items derived from:
 - Optional cross-validated predictive modeling (AUC/RMSE)
 - Optional **CCA** reserved for later (see §11); not used in v5.
 
+**Phenomenology diagnostics (new)**
+- Signature coverage: proportion of events assigned to signatures with evidence `n >= n_min`
+- Signature sparsity: distribution of sample counts per signature (heavy-tail concentration indicates over-fragmentation)
+- Transfer gain: delta in recovery success/time when selection source is `fitness+phenomenology` vs `fitness` only
+- Confidence gating effect: how often overrides are blocked by evidence threshold or influence threshold
+
+Recommended models:
+- Mixed-effects logistic for override acceptance (accepted ~ signature_count + burden + trigger + (1|person))
+- Mixed-effects survival/linear models for recovery-time deltas conditional on selection source
+
 ---
 
 ## 8) Phase 3 — Controlled tuning / NK-compatible exploration
@@ -285,6 +306,11 @@ Missing data:
 - Mixed models under MAR
 - Sensitivity: **multiple imputation**; pattern-mixture checks if needed
 
+Phenomenology-specific reporting in field evaluation:
+- report override rate and confidence-gated override rate
+- stratify outcomes by high-coverage vs sparse signatures
+- include ablation: policy layer only vs policy+phenomenology layer
+
 ---
 
 ## 10) Empirical substitution points (what starts hard-coded, what becomes learned)
@@ -306,6 +332,8 @@ Missing data:
 - Gene effects and interactions from MRT/crossover (Phase 3)
 - Fitness weights ρ from BWS/paired comparisons (Phase 1–4)
 - Language pack λ refined for comprehension and burden reduction (Phase 1–4)
+- Signature map design (granularity/coarsening rules) to control sparsity while preserving actionable structure
+- Phenomenology thresholds (`n_min`, influence) tuned from empirical transfer-performance curves
 
 ---
 
@@ -326,6 +354,34 @@ In **v5**:
 - Data are anonymized; logs are stored securely.
 - In high-stress contexts (exams), emphasize “recovery” rather than “failure.”
 
+### 12.1 Aristotelian clarification for study interpretation
+Use the following interpretation frame:
+- **Physics:** the regulator supports transition from delayed potential to enacted work (timely activity).
+- **Categories:** operational variables are treated as structured predicates of task/domain/time/quality/relation (not a single scalar mood).
+- **Ethics:** target is an engaged practical mean (flow-capable), not maximal pressure.
+- **Politics:** user agency is preserved by local-first control, transparency, and right to pause/quit/retune language.
+
+### 12.2 Unequal doctrine of the mean (procrastination-centered)
+The ethical center is asymmetric:
+- deficiency side: procrastination/avoidant delay (primary failure mode),
+- excess side: over-control burden/annoyance,
+- mean: sustainable engaged progress.
+
+Methodological rule:
+- treat procrastination reduction as higher-priority than small burden increases when feasibility is under threat,
+- but never relax hard safeguards against coercive overreach (pause rights, burden tracking, feasibility constraints).
+
+### 12.3 What to report empirically
+In addition to standard outcomes, report an asymmetry audit:
+- `Pr(procrastination-like events)` vs `Pr(over-control burden events)`
+- burden change conditional on procrastination reduction
+- any evidence that burden minimization degraded feasibility or recovery
+
+A design is ethically acceptable only if:
+- feasibility is preserved,
+- procrastination burden decreases over time,
+- burden costs remain within predeclared tolerances.
+
 ---
 
 ## 13) Reporting checklist (what to include in papers)
@@ -338,6 +394,10 @@ In **v5**:
 
 **Phase 4 paper**
 - Design, primary outcomes, mixed model results, adherence/dropout, burden, goal-weighted utility analysis
+- Phenomenology audit: signature coverage/sparsity, override behavior, and ablation results
+
+Operational template:
+- Use `PHENOM_AUDIT_TEMPLATE.md` as the minimum reporting structure for phenomenology analyses.
 
 ---
 

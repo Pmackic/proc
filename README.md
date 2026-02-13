@@ -221,6 +221,46 @@ python prok_v5.py fitness set fitness.default.prokfit
 
 ---
 
+## Mathematical phenomenology (new)
+
+PROK can now learn **structural disturbance signatures** (domain + label + trigger + TMT bins) and reuse recoveries that worked on homologous cases.
+
+Signature shape:
+- `domain|label|trigger|E{E}V{V}D{D}G{G}` (example: `skola|DRIFT|distraction|EMVMDNGL`)
+
+Inspect learned knowledge:
+```bash
+python prok_v5.py phenom show
+```
+
+Tune influence:
+```bash
+python prok_v5.py phenom set --enabled on --min-samples 3 --influence 0.35
+```
+
+Clear learned signatures (keep settings):
+```bash
+python prok_v5.py phenom reset
+```
+
+Generate a Markdown audit from logs:
+```bash
+python prok_v5.py phenom audit --out PHENOM_AUDIT_EXAMPLE.md
+# optional custom log file:
+python prok_v5.py phenom audit --log some_run.jsonl --out audit.md
+```
+
+Selection behavior:
+- baseline candidate ranking still uses fitness DSL + goals
+- phenomenology can override within the top candidates only when enough evidence exists
+- evidence gate is controlled by `--min-samples`
+- override sensitivity is controlled by `--influence` (0..1)
+
+Logs:
+- `course_correct` events now include `phenomenology_signature` and `selection_source`
+
+---
+
 ## Data files and export
 
 PROK writes files in the current directory:
@@ -270,3 +310,13 @@ python prok_v5.py cca
 ## Ethics / scope note
 
 This is a self-regulation prototype for research and personal use. It is not a diagnostic tool and does not guarantee control—its goal is **faster recovery and feasibility preservation**, not perfection.
+
+Ethical stance (short):
+- target is a sustainable engaged mean (flow-capable work), not maximal pressure
+- control is asymmetric: procrastination risk is treated as more harmful than mild annoyance when feasibility is threatened
+- user agency remains primary: pause/quit and language customization are always available
+
+Show current doctrine + guardrails:
+```bash
+python prok_v5.py ethics show
+```

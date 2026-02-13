@@ -37,6 +37,29 @@ System does:
 - optional CCA mapping **exists as an interface** but is OFF in v5
 - compute algedonic alarm (ok/warning/critical) from slack + drift
 
+### 0.1 Ethical clarification (Aristotelian framing)
+This regulator is normatively oriented to practical agency, not mere output.
+
+Aristotelian anchors used in v5 interpretation:
+- **Physics (kinesis -> energeia):** regulation moves episodes from blocked/delayed potential into timely activity.
+- **Categories:** observations are structured as substance/context (task/domain), quality (drift/procrastination/flow markers), relation (deadline/slack), quantity (minutes/blocks), time (session/horizon), and action/passion (intervention/response).
+- **Ethics (doctrine of the mean):** target state is not maximal pressure, but stable engaged work ("flow-capable engagement").
+- **Politics:** the system remains non-coercive and local-first; user pause/quit and language autonomy are preserved as governance constraints.
+
+### 0.2 Unequal doctrine of the mean (flow-centered, procrastination-weighted)
+v5 adopts an **asymmetric** mean:
+- left deviation: procrastination / avoidant delay (primary risk to feasibility and agency)
+- center: engaged, sustainable progress (flow-compatible)
+- right deviation: over-control / excessive pressure / annoyance burden
+
+The asymmetry is intentional:
+- procrastination receives stronger corrective priority than mild annoyance when feasibility is threatened,
+- but hard safety constraints prevent collapsing into coercive over-control.
+
+Operational rule:
+- optimize toward the center with unequal penalties, typically `penalty(procrastination) > penalty(annoyance)`,
+- while maintaining viability guards (`slack != neg`, recovery not persistently slow).
+
 ---
 
 ## 1) Ashby closed-loop formulation
@@ -265,6 +288,54 @@ Homomorphism conditions:
 
 **Empirical layer:** focus groups and usability testing primarily modify λ_t and the trigger vocabulary.
 
+### 9.1 Phenomenological homology memory (implemented extension)
+To operationalize Petrović-style mathematical phenomenology, define a finite signature map:
+- σ_t = SIG(d, ℓ_t, r_t, θ_t) ∈ Σ
+- Example encoding: `domain|label|trigger|E{E}V{V}D{D}G{G}`
+
+Each signature class stores empirical recovery outcomes:
+- M(σ) = { per-action tries, helped-rate, burden stats, sample count }
+
+Selection rule in v5 extension:
+1) rank candidates by fitness DSL (and goal profile ρ)
+2) restrict to top-K candidates (K=3 in current implementation)
+3) if M(σ_t) has enough evidence (n ≥ n_min), allow phenomenology to re-rank within top-K
+4) apply only if empirical score exceeds influence threshold τ
+
+Interpretation:
+- this preserves structural homology by transferring action choice across episodes with the same invariant signature
+- it increases effective control precision without changing canonical state/action alphabets
+- all memory is local-first and auditable in state/log files
+
+### 9.2 Algorithm visual (layer interaction)
+```text
+DISTURBANCE/EPISODE
+  -> state update (TMT/drift/slack/alarm)
+  -> gene-policy candidate generation
+  -> homeostat safety filter (require/veto)
+  -> fitness+goals ranking
+  -> phenomenology signature check
+       if n>=n_min and score>=tau: re-rank within top-K
+  -> execute action (+ tighten checks / replan)
+  -> log outcome
+  -> update phenomenology memory (mid loop)
+  -> update NK/gene tuning (slow loop)
+```
+
+### 9.3 Sailor analogy (operational mental model)
+```text
+Watchman spots trouble
+  -> Navigator checks charts (feasibility/route)
+  -> Engine room exposes possible maneuvers (genes)
+  -> Safety officer blocks dangerous moves (homeostat)
+  -> First Mate ranks remaining maneuvers (fitness+goals)
+  -> Old Sailor checks logbook of similar seas (phenomenology)
+       if enough evidence: refine choice within approved maneuvers
+  -> Crew executes
+  -> Logkeeper records outcome
+  -> Old Sailor updates logbook; Captain updates doctrine over time (NK tuning)
+```
+
 ---
 
 ## 10) NK layer: fitness landscape over regulator designs
@@ -322,6 +393,10 @@ Rules:
 - `require` = **hard veto** (candidates violating are excluded if any candidates satisfy it)
 - `penalty` = soft cost (higher is worse)
 - `prefer` = soft bonus (lower is better)
+
+Unequal-mean guidance (default):
+- encode stronger penalties for procrastination/intent-gap than for moderate annoyance,
+- keep anti-coercion guardrails via `require` constraints and pause/quit rights.
 
 Integration:
 - The homeostat score is applied **before** fitness-DSL ranking.

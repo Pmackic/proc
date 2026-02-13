@@ -76,7 +76,7 @@
       "recent_drift_count": 0
     }
   ],
-  "active_task_id": "fiz-2867",
+  "active_task_id": "report-9826",
   "plan_block_min": 50,
   "tiny_min": 10,
   "day_start": "08:00",
@@ -86,7 +86,7 @@
   "date_blackouts": [],
   "daterange_blackouts": [],
   "today_min_done": false,
-  "last_min_date": "2026-02-12",
+  "last_min_date": "2026-02-13",
   "streak": 2,
   "last_streak_date": "2026-02-05",
   "genome": {
@@ -162,6 +162,12 @@
     "trigger.anxiety": "anxiety",
     "trigger.fatigue": "fatigue",
     "trigger.other": "other"
+  },
+  "phenomenology": {
+    "enabled": true,
+    "min_samples": 3,
+    "influence": 0.35,
+    "signatures": {}
   },
   "use_cca": false,
   "cca_model_path": null

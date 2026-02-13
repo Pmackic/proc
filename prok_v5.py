@@ -14,12 +14,14 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
+from collections import Counter, defaultdict
 import argparse
 import datetime as dt
 import json
 import math
 import random
 import re
+import statistics
 import sys
 import time
 import select
@@ -216,6 +218,16 @@ def default_goal_profile() -> Dict[str, Any]:
             ["progress"],
         ],
         "annoyance_max_checks": 999,  # soft constraint; can be lowered in study
+    }
+
+def default_phenomenology() -> Dict[str, Any]:
+    # Mathematical phenomenology: classify episodes by invariant structure
+    # and transfer successful recoveries to homologous cases.
+    return {
+        "enabled": True,
+        "min_samples": 3,
+        "influence": 0.35,
+        "signatures": {},
     }
 
 # ----------------------------
@@ -467,6 +479,10 @@ def eval_expr(expr: Expr, ctx: Dict[str, Any]) -> bool:
     return False
 
 def rank_candidates(program: ProkFitProgram, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    scored = rank_candidates_scored(program, candidates)
+    return scored[0][1]
+
+def rank_candidates_scored(program: ProkFitProgram, candidates: List[Dict[str, Any]]) -> List[Tuple[Tuple[int, ...], Dict[str, Any]]]:
     def passes_requires(ctx: Dict[str, Any]) -> bool:
         return all(eval_expr(r, ctx) for r in program.requires)
 
@@ -505,7 +521,7 @@ def rank_candidates(program: ProkFitProgram, candidates: List[Dict[str, Any]]) -
             scored.append((tuple(lex), c))
 
     scored.sort(key=lambda x: x[0])
-    return scored[0][1]
+    return scored
 
 def built_in_fitness() -> ProkFitProgram:
     src = """require slack != neg
@@ -614,6 +630,7 @@ class ProkState:
     study_mode: bool = False
     goal_profile: Dict[str, Any] = None
     language_pack: Dict[str, str] = None
+    phenomenology: Dict[str, Any] = None
     use_cca: bool = False
     cca_model_path: Optional[str] = None
 
@@ -626,6 +643,13 @@ def _init_defaults(st: ProkState) -> None:
     if "version" not in st.genome: st.genome = default_genome()
     if st.goal_profile is None: st.goal_profile = default_goal_profile()
     if st.language_pack is None: st.language_pack = dict(DEFAULT_LANG)
+    if st.phenomenology is None: st.phenomenology = default_phenomenology()
+    if not isinstance(st.phenomenology, dict): st.phenomenology = default_phenomenology()
+    if "enabled" not in st.phenomenology: st.phenomenology["enabled"] = True
+    if "min_samples" not in st.phenomenology: st.phenomenology["min_samples"] = 3
+    if "influence" not in st.phenomenology: st.phenomenology["influence"] = 0.35
+    if "signatures" not in st.phenomenology or not isinstance(st.phenomenology.get("signatures"), dict):
+        st.phenomenology["signatures"] = {}
     if st.domains is None: st.domains = {}
 
     for t in st.tasks:
@@ -704,6 +728,7 @@ def load_state() -> ProkState:
         study_mode=bool(data.get("study_mode", False)),
         goal_profile=(data.get("goal_profile") or None),
         language_pack=(data.get("language_pack") or None),
+        phenomenology=(data.get("phenomenology") or None),
         use_cca=bool(data.get("use_cca", False)),
         cca_model_path=data.get("cca_model_path"),
     )
@@ -822,6 +847,351 @@ def update_domain_drift(ds: DomainState, drifted: bool) -> None:
     alpha = 0.2
     target = 1.0 if drifted else 0.0
     ds.drift_ema = (1 - alpha) * float(ds.drift_ema) + alpha * target
+
+# ----------------------------
+# Mathematical phenomenology
+# ----------------------------
+
+def phenomenology_signature(task: Task, label: str, trigger: str) -> str:
+    theta = (task.tmt_bins or TMTBins()).sanitize()
+    dom = (task.domain or "general").lower()
+    return f"{dom}|{label}|{trigger}|E{theta.E}V{theta.V}D{theta.D}G{theta.G}"
+
+def _phenomenology_action_score(stats: Dict[str, Any]) -> Tuple[float, int]:
+    rated = _to_int(stats.get("rated_helped"), 0)
+    yes = _to_int(stats.get("helped_yes"), 0)
+    burden_n = _to_int(stats.get("burden_n"), 0)
+    burden_sum = _to_float(stats.get("burden_sum"), 0.0)
+
+    success = (yes + 1.0) / (rated + 2.0)  # Laplace smoothing
+    if burden_n > 0:
+        burden_avg = burden_sum / max(1, burden_n)
+        burden_penalty = (burden_avg - 1.0) / 4.0
+    else:
+        burden_penalty = 0.0
+    return success - 0.2 * burden_penalty, rated
+
+def phenomenology_recommendation(
+    st: ProkState,
+    signature: str,
+    candidate_names: List[str],
+) -> Optional[Tuple[str, float, int]]:
+    ph = st.phenomenology or {}
+    if not bool(ph.get("enabled", True)):
+        return None
+    min_samples = max(1, _to_int(ph.get("min_samples"), 3))
+    entry = (ph.get("signatures") or {}).get(signature) or {}
+    actions = entry.get("actions") or {}
+    allowed = set(candidate_names)
+
+    best_name = None
+    best_score = -1e9
+    best_n = 0
+    for name, stats in actions.items():
+        if name not in allowed:
+            continue
+        score, rated = _phenomenology_action_score(stats)
+        if rated < min_samples:
+            continue
+        if score > best_score:
+            best_name = name
+            best_score = score
+            best_n = rated
+    if not best_name:
+        return None
+    return best_name, best_score, best_n
+
+def phenomenology_record_outcome(
+    st: ProkState,
+    signature: str,
+    chosen: str,
+    ratings: Dict[str, Any],
+) -> None:
+    ph = st.phenomenology or {}
+    sigs = ph.setdefault("signatures", {})
+    entry = sigs.setdefault(signature, {"n": 0, "actions": {}})
+    entry["n"] = _to_int(entry.get("n"), 0) + 1
+    actions = entry.setdefault("actions", {})
+    a = actions.setdefault(chosen, {
+        "tries": 0,
+        "rated_helped": 0,
+        "helped_yes": 0,
+        "burden_n": 0,
+        "burden_sum": 0.0,
+    })
+    a["tries"] = _to_int(a.get("tries"), 0) + 1
+    if ratings.get("helped") is not None:
+        a["rated_helped"] = _to_int(a.get("rated_helped"), 0) + 1
+        if bool(ratings.get("helped")):
+            a["helped_yes"] = _to_int(a.get("helped_yes"), 0) + 1
+    if ratings.get("burden") is not None:
+        a["burden_n"] = _to_int(a.get("burden_n"), 0) + 1
+        a["burden_sum"] = _to_float(a.get("burden_sum"), 0.0) + float(ratings.get("burden"))
+
+def _load_log_records(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+def _legacy_signature_from_event(ev: Dict[str, Any]) -> str:
+    domain = str(ev.get("domain") or "unknown").lower()
+    label = str(ev.get("label") or "UNKNOWN")
+    trigger = str(ev.get("trigger") or "other")
+    th = ev.get("theta") or ev.get("theta_next") or {}
+    E = str(th.get("E") or "M")
+    V = str(th.get("V") or "M")
+    D = str(th.get("D") or "N")
+    G = str(th.get("G") or "L")
+    return f"{domain}|{label}|{trigger}|E{E}V{V}D{D}G{G}"
+
+def _safe_rate(num: int, den: int) -> Optional[float]:
+    return (float(num) / float(den)) if den > 0 else None
+
+def _safe_avg(vals: List[float]) -> Optional[float]:
+    return (sum(vals) / float(len(vals))) if vals else None
+
+def _fmt_num(x: Optional[float], digits: int = 2) -> str:
+    if x is None:
+        return "N/A"
+    return f"{x:.{digits}f}"
+
+def _gini(vals: List[int]) -> Optional[float]:
+    if not vals:
+        return None
+    xs = [float(v) for v in vals if v >= 0]
+    if not xs:
+        return None
+    s = sum(xs)
+    if s <= 0:
+        return 0.0
+    xs.sort()
+    n = len(xs)
+    wsum = 0.0
+    for i, x in enumerate(xs, 1):
+        wsum += i * x
+    return ((2.0 * wsum) / (n * s)) - ((n + 1.0) / n)
+
+def build_phenom_audit_markdown(st: ProkState, records: List[Dict[str, Any]], log_path: Path) -> str:
+    events = [r for r in records if str(r.get("kind")) in ("course_correct", "d", "p")]
+    n_events = len(events)
+
+    pids = sorted({str(r.get("participant_id")) for r in records if r.get("participant_id") not in (None, "")})
+    sess = sorted({str(r.get("session_id")) for r in records if r.get("session_id") not in (None, "")})
+    ts = [str(r.get("ts")) for r in records if r.get("ts")]
+    window = "N/A"
+    if ts:
+        ds = sorted(t[:10] for t in ts if len(t) >= 10)
+        if ds:
+            window = f"{ds[0]} to {ds[-1]}"
+
+    ph = st.phenomenology or default_phenomenology()
+    n_min = max(1, _to_int(ph.get("min_samples"), 3))
+    tau = _to_float(ph.get("influence"), 0.35)
+    sig_field_present = sum(1 for e in events if e.get("phenomenology_signature"))
+    sel_field_present = sum(1 for e in events if e.get("selection_source"))
+
+    sigs = [str(e.get("phenomenology_signature") or _legacy_signature_from_event(e)) for e in events]
+    sig_counts = Counter(sigs)
+    sig_vals = sorted(sig_counts.values())
+    qual_events = sum(1 for s in sigs if sig_counts.get(s, 0) >= n_min)
+    median_sig = statistics.median(sig_vals) if sig_vals else None
+    p90_sig = sig_vals[int((len(sig_vals) - 1) * 0.9)] if sig_vals else None
+    gini = _gini(sig_vals)
+
+    helped_vals = [e.get("helped") for e in events if e.get("helped") is not None]
+    helped_yes = sum(1 for x in helped_vals if bool(x))
+    burden_vals = [float(e.get("burden")) for e in events if isinstance(e.get("burden"), (int, float))]
+
+    rows_t1: Dict[str, Dict[str, Any]] = {}
+    for sig in sig_counts:
+        rows_t1[sig] = {"events_n": sig_counts[sig], "actions": defaultdict(lambda: {"rated_helped": 0, "helped_yes": 0, "burden": []})}
+    for e in events:
+        sig = str(e.get("phenomenology_signature") or _legacy_signature_from_event(e))
+        action = str(e.get("chosen") or e.get("choice") or "UNKNOWN")
+        a = rows_t1[sig]["actions"][action]
+        if e.get("helped") is not None:
+            a["rated_helped"] += 1
+            if bool(e.get("helped")):
+                a["helped_yes"] += 1
+        if isinstance(e.get("burden"), (int, float)):
+            a["burden"].append(float(e.get("burden")))
+
+    def best_action(actions: Dict[str, Any]) -> Tuple[str, int, Optional[float], Optional[float]]:
+        best = ("UNKNOWN", -1e9, 0, None, None)
+        for name, stx in actions.items():
+            score, rated = _phenomenology_action_score({
+                "rated_helped": stx.get("rated_helped", 0),
+                "helped_yes": stx.get("helped_yes", 0),
+                "burden_n": len(stx.get("burden", [])),
+                "burden_sum": sum(stx.get("burden", [])),
+            })
+            hr = _safe_rate(stx.get("helped_yes", 0), stx.get("rated_helped", 0))
+            ba = _safe_avg(stx.get("burden", []))
+            if score > best[1]:
+                best = (name, score, rated, hr, ba)
+        return best[0], best[2], best[3], best[4]
+
+    t2 = defaultdict(lambda: {"n": 0, "helped_yes": 0, "helped_n": 0, "burden": []})
+    t3 = defaultdict(lambda: {"n": 0, "helped_yes": 0, "helped_n": 0, "burden": []})
+    for e in events:
+        sel = str(e.get("selection_source") or "fitness (inferred, legacy)")
+        t2[sel]["n"] += 1
+        domain = str(e.get("domain") or "unknown").lower()
+        trig = str(e.get("trigger") or "other")
+        t3[(domain, trig, sel)]["n"] += 1
+        if e.get("helped") is not None:
+            t2[sel]["helped_n"] += 1
+            t3[(domain, trig, sel)]["helped_n"] += 1
+            if bool(e.get("helped")):
+                t2[sel]["helped_yes"] += 1
+                t3[(domain, trig, sel)]["helped_yes"] += 1
+        if isinstance(e.get("burden"), (int, float)):
+            b = float(e.get("burden"))
+            t2[sel]["burden"].append(b)
+            t3[(domain, trig, sel)]["burden"].append(b)
+
+    phenom_n = t2.get("fitness+phenomenology", {}).get("n", 0)
+    override_rate = _safe_rate(phenom_n, n_events)
+    notes = []
+    if sig_field_present == 0:
+        notes.append("- Log events are legacy/pre-phenomenology for intervention events; no `phenomenology_signature` fields are present.")
+    if sel_field_present == 0:
+        notes.append("- Log events are legacy/pre-phenomenology for intervention events; no `selection_source` fields are present.")
+    notes_block = "\n".join(notes) if notes else "- Phenomenology fields detected in intervention events."
+
+    lines: List[str] = []
+    lines.append("# PROK v5 Phenomenology Audit Example")
+    lines.append("")
+    lines.append(f"This example is pre-filled from `{log_path.name}` as of {_iso_today()}.")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## 1) Study metadata")
+    lines.append("")
+    lines.append("- Study ID: `local-auto-audit`")
+    lines.append(f"- Dataset window: `{window}`")
+    lines.append(f"- Participants (n): `{len(pids)}`")
+    lines.append(f"- Sessions (n): `{len(sess)}`")
+    lines.append(f"- Course-correct events (n): `{n_events}`")
+    lines.append("- Phenomenology settings at audit time (`.prok_state.json`):")
+    lines.append(f"  - `enabled`: `{str(bool(ph.get('enabled', True))).lower()}`")
+    lines.append(f"  - `min_samples (n_min)`: `{n_min}`")
+    lines.append(f"  - `influence (tau)`: `{tau:.2f}`")
+    lines.append("")
+    lines.append("Note:")
+    lines.append(notes_block)
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## 2) Core metrics")
+    lines.append("")
+    lines.append("### A) Coverage and sparsity")
+    lines.append("")
+    lines.append(f"- Signature count `|Sigma|`: `{len(sig_counts)}`")
+    lines.append(f"- Events mapped to signatures: `{n_events} / {n_events} = {_fmt_num(_safe_rate(n_events, n_events))}`" if n_events > 0 else "- Events mapped to signatures: `0 / 0 = N/A`")
+    lines.append(f"- Evidence-qualified coverage (`n(signature) >= n_min`): `{qual_events} / {n_events} = {_fmt_num(_safe_rate(qual_events, n_events))}`")
+    lines.append(f"- Median events per signature: `{_fmt_num(median_sig, 0) if median_sig is not None else 'N/A'}`")
+    lines.append(f"- P90 events per signature: `{_fmt_num(float(p90_sig), 0) if p90_sig is not None else 'N/A'}`")
+    lines.append(f"- Gini over signature counts: `{_fmt_num(gini)}`")
+    lines.append("")
+    lines.append("### B) Override behavior")
+    lines.append("")
+    lines.append(f"- Candidate decisions total: `{n_events}`")
+    lines.append(f"- Baseline-only selections (`selection_source=fitness`): `{t2.get('fitness', {}).get('n', 0) if sel_field_present else 'N/A (legacy schema)'}`")
+    lines.append(f"- Phenomenology selections (`selection_source=fitness+phenomenology`): `{phenom_n}`")
+    lines.append(f"- Override rate: `{phenom_n} / {n_events} = {_fmt_num(override_rate)}`")
+    lines.append("- Confidence-gated rejection count: `N/A`")
+    lines.append("")
+    lines.append("### C) Outcome deltas")
+    lines.append("")
+    lines.append(f"- Recovery success rated events: `{len(helped_vals)}`")
+    lines.append(f"- Recovery success yes: `{helped_yes}`")
+    lines.append(f"- Recovery success rate (overall rated): `{_fmt_num(_safe_rate(helped_yes, len(helped_vals)))}`")
+    lines.append(f"- Burden ratings count: `{len(burden_vals)}`")
+    lines.append(f"- Burden mean: `{_fmt_num(_safe_avg(burden_vals))}`")
+    lines.append("")
+    lines.append("Delta block:")
+    lines.append("- `Delta_success`: `N/A`")
+    lines.append("- `Delta_burden`: `N/A`")
+    lines.append("- `Delta_time`: `N/A`")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## 3) Required tables")
+    lines.append("")
+    lines.append("### T1) Signature summary")
+    lines.append("")
+    lines.append("| signature | events_n | qualified (`>=n_min`) | best_action | best_action_rated_n | best_action_helped_rate | best_action_burden_avg |")
+    lines.append("|---|---:|---|---|---:|---:|---:|")
+    for sig, row in sorted(rows_t1.items(), key=lambda kv: (-kv[1]["events_n"], kv[0])):
+        bname, brated, bhr, bba = best_action(row["actions"])
+        qual = "yes" if row["events_n"] >= n_min else "no"
+        lines.append(f"| {sig} | {row['events_n']} | {qual} | {bname} | {brated} | {_fmt_num(bhr)} | {_fmt_num(bba)} |")
+    lines.append("")
+    lines.append("### T2) Action comparison by selection source")
+    lines.append("")
+    lines.append("| selection_source | events_n | helped_yes_n | helped_rated_n | helped_rate | burden_n | burden_avg | time_to_recover_avg |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---|")
+    for sel, row in sorted(t2.items(), key=lambda kv: (-kv[1]["n"], kv[0])):
+        lines.append(
+            f"| {sel} | {row['n']} | {row['helped_yes']} | {row['helped_n']} | {_fmt_num(_safe_rate(row['helped_yes'], row['helped_n']))} | {len(row['burden'])} | {_fmt_num(_safe_avg(row['burden']))} | N/A |"
+        )
+    if not t2:
+        lines.append("| N/A | 0 | 0 | 0 | N/A | 0 | N/A | N/A |")
+    lines.append("")
+    lines.append("### T3) Trigger/domain stratification")
+    lines.append("")
+    lines.append("| domain | trigger | selection_source | events_n | helped_rate | burden_avg |")
+    lines.append("|---|---|---|---:|---:|---:|")
+    for (dom, trig, sel), row in sorted(t3.items(), key=lambda kv: (-kv[1]["n"], kv[0][0], kv[0][1], kv[0][2])):
+        lines.append(
+            f"| {dom} | {trig} | {sel} | {row['n']} | {_fmt_num(_safe_rate(row['helped_yes'], row['helped_n']))} | {_fmt_num(_safe_avg(row['burden']))} |"
+        )
+    if not t3:
+        lines.append("| N/A | N/A | N/A | 0 | N/A | N/A |")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## 4) Minimal statistical checks")
+    lines.append("")
+    lines.append("Not auto-run by this command.")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## 5) Ablation block")
+    lines.append("")
+    lines.append("Current result:")
+    lines.append("- Baseline policy behavior is observed from available events.")
+    lines.append("- Post-upgrade phenomenology-vs-fitness ablation requires new intervention data.")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## 6) Decision rubric")
+    lines.append("")
+    cov = _safe_rate(qual_events, n_events) if n_events > 0 else None
+    cov_flag = "PASS" if cov is not None and cov >= 0.5 else "FAIL"
+    spar_flag = "PASS" if median_sig is not None and float(median_sig) >= 3.0 else "FAIL"
+    over_flag = "PASS" if override_rate is not None and 0.05 <= override_rate <= 0.5 else "WATCH"
+    lines.append(f"- Coverage adequate: `{cov_flag}`")
+    lines.append(f"- Sparsity acceptable: `{spar_flag}`")
+    lines.append(f"- Override rate non-trivial but bounded: `{over_flag}`")
+    lines.append("- `Delta_success` non-negative: `WATCH`")
+    lines.append("- `Delta_burden` non-positive: `WATCH`")
+    lines.append("- No feasibility regression: `WATCH`")
+    lines.append("")
+    lines.append("Final recommendation:")
+    lines.append("- `TUNE SIGNATURE GRANULARITY` and collect more post-upgrade intervention data before increasing influence.")
+
+    return "\n".join(lines) + "\n"
 
 # ----------------------------
 # Capacity and feasibility
@@ -1333,12 +1703,27 @@ def run_session(
             label = "PROCRASTINATION" if kind == "p" else ("DRIFT" if kind == "d" else "BLOCKED")
 
         task.tmt_bins = update_tmt_bins(task.tmt_bins, label, trigger, recovery_type=None)
+        signature = phenomenology_signature(task, label, trigger)
 
         base_prog = fitness_program or load_fitness_program(st) or built_in_fitness()
         prog = fitness_from_goal_profile(base_prog, st.goal_profile or default_goal_profile())
 
         candidates = build_recovery_candidates(st, task=task, label=label, trigger=trigger, check_gaps=(min_gap, max_gap))
-        best = rank_candidates(prog, candidates)
+        ranked = rank_candidates_scored(prog, candidates)
+        best = ranked[0][1]
+        selection_source = "fitness"
+
+        shortlist = [c for _, c in ranked[:3]]
+        rec = phenomenology_recommendation(st, signature, [c["name"] for c in shortlist])
+        if rec:
+            rec_name, rec_score, rec_n = rec
+            influence = _to_float((st.phenomenology or {}).get("influence"), 0.35)
+            if rec_name != best["name"] and rec_score >= influence:
+                alt = next((c for c in shortlist if c["name"] == rec_name), None)
+                if alt is not None:
+                    best = alt
+                    selection_source = "fitness+phenomenology"
+                    print(f"Phenomenology match: using {rec_name} (score={rec_score:.2f}, n={rec_n}).")
 
         task.tmt_bins = best["theta_next"]
         if random_checks:
@@ -1374,9 +1759,12 @@ def run_session(
             "haghbin": asdict(flags) if flags else None,
             "theta": asdict(task.tmt_bins),
             "chosen": best["name"],
+            "selection_source": selection_source,
+            "phenomenology_signature": signature,
             "gaps": [min_gap, max_gap] if random_checks else None,
             **ratings,
         })
+        phenomenology_record_outcome(st, signature, best["name"], ratings)
 
         ds.recovery_counts[best["name"]] = _to_int(ds.recovery_counts.get(best["name"]), 0) + 1
 
@@ -1807,6 +2195,8 @@ def cmd_status(args) -> None:
         print(f"   {active} {t.id} | {t.domain} | {t.name} | deadline={t.deadline or '-'} | remaining={t.remaining_minutes}/{t.total_minutes} | slack={slack_txt} | drift={t.recent_drift_count} | θ={asdict(t.tmt_bins)}")
     print(f"  genome.explore: {st.genome.get('g10_explore')}")
     print(f"  goal_profile: {st.goal_profile}")
+    ph = st.phenomenology or {}
+    print(f"  phenomenology: enabled={bool(ph.get('enabled', True))} | signatures={len((ph.get('signatures') or {}))} | min_samples={_to_int(ph.get('min_samples'), 3)} | influence={_to_float(ph.get('influence'), 0.35):.2f}")
     print(f"  use_cca: {st.use_cca} (v4 placeholder, not used)")
     print(f"  state file: {STATE_FILE.resolve()}")
     print(f"  log file: {LOG_FILE.resolve()}")
@@ -1958,6 +2348,73 @@ def cmd_lang(args) -> None:
         save_state(st)
         print("Saved language pack."); return
 
+def cmd_phenom(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    ph = st.phenomenology or default_phenomenology()
+    sigs = ph.get("signatures") or {}
+
+    if args.action == "show":
+        print(_json_dump({
+            "enabled": bool(ph.get("enabled", True)),
+            "min_samples": _to_int(ph.get("min_samples"), 3),
+            "influence": _to_float(ph.get("influence"), 0.35),
+            "signatures": len(sigs),
+        }))
+        if not sigs:
+            print("No phenomenology signatures learned yet.")
+            return
+        print("Top signatures:")
+        top = sorted(sigs.items(), key=lambda kv: _to_int((kv[1] or {}).get("n"), 0), reverse=True)[:10]
+        for sig, entry in top:
+            actions = (entry or {}).get("actions") or {}
+            best_name = "-"
+            best_score = -1e9
+            best_n = 0
+            for name, stats in actions.items():
+                score, rated = _phenomenology_action_score(stats or {})
+                if rated > 0 and score > best_score:
+                    best_name = name
+                    best_score = score
+                    best_n = rated
+            if best_name == "-":
+                print(f"  {sig} | n={_to_int(entry.get('n'), 0)} | best=-")
+            else:
+                print(f"  {sig} | n={_to_int(entry.get('n'), 0)} | best={best_name} score={best_score:.2f} rated={best_n}")
+        return
+
+    if args.action == "audit":
+        log_path = Path(args.log or str(LOG_FILE))
+        records = _load_log_records(log_path)
+        md = build_phenom_audit_markdown(st, records, log_path)
+        out = Path(args.out or "PHENOM_AUDIT_EXAMPLE.md")
+        out.write_text(md, encoding="utf-8")
+        print(f"Wrote phenomenology audit: {out.resolve()}")
+        return
+
+    if args.action == "set":
+        if args.enabled is not None:
+            ph["enabled"] = (str(args.enabled).lower() == "on")
+        if args.min_samples is not None:
+            ph["min_samples"] = max(1, _to_int(args.min_samples, _to_int(ph.get("min_samples"), 3)))
+        if args.influence is not None:
+            ph["influence"] = max(0.0, min(1.0, _to_float(args.influence, _to_float(ph.get("influence"), 0.35))))
+        st.phenomenology = ph
+        save_state(st)
+        print("Phenomenology settings updated.")
+        return
+
+    if args.action == "reset":
+        keep = {
+            "enabled": bool(ph.get("enabled", True)),
+            "min_samples": max(1, _to_int(ph.get("min_samples"), 3)),
+            "influence": max(0.0, min(1.0, _to_float(ph.get("influence"), 0.35))),
+            "signatures": {},
+        }
+        st.phenomenology = keep
+        save_state(st)
+        print("Phenomenology memory reset (settings kept).")
+        return
+
 def cmd_export(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
     out = Path(args.out or f"prok_export_{_iso_today()}.zip")
@@ -1973,6 +2430,31 @@ def cmd_cca(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
     print("CCA is a placeholder in v4 and is NOT used.")
     print(_json_dump({"use_cca": st.use_cca, "cca_model_path": st.cca_model_path}))
+
+def cmd_ethics(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    ph = st.phenomenology or {}
+    print("ETHICAL CLARIFICATION (Aristotelian, operational):")
+    print("- Physics: move from delayed potential to enacted timely work.")
+    print("- Categories: task/domain/time/quality/relation structure decisions.")
+    print("- Ethics: target is flow-capable engaged mean, not maximal pressure.")
+    print("- Politics: local-first, non-coercive, user pause/quit rights preserved.")
+    print("")
+    print("UNEQUAL DOCTRINE OF THE MEAN:")
+    print("- Deficiency risk: procrastination/avoidant delay (primary).")
+    print("- Center target: sustainable engaged progress.")
+    print("- Excess risk: over-control/annoyance burden.")
+    print("- Default asymmetry: penalty(procrastination) > penalty(annoyance),")
+    print("  with feasibility guards dominant (slack violations are critical).")
+    print("")
+    print("CURRENT RUNTIME GUARDRAILS:")
+    print(f"- pause_policy: {st.genome.get('g9_pause_policy')}")
+    print(f"- replan_threshold: {st.genome.get('g8_replan_threshold')}")
+    print(f"- study_mode: {st.study_mode} (burden/helped ratings when enabled)")
+    print(f"- phenomenology.enabled: {bool(ph.get('enabled', True))}")
+    print(f"- phenomenology.min_samples: {_to_int(ph.get('min_samples'), 3)}")
+    print(f"- phenomenology.influence: {_to_float(ph.get('influence'), 0.35):.2f}")
+    print(f"- use_cca: {st.use_cca} (placeholder only)")
 
 # ----------------------------
 # Parser
@@ -2102,9 +2584,27 @@ def build_parser() -> argparse.ArgumentParser:
     sl2.add_parser("wizard").set_defaults(func=cmd_lang)
     sl2_set = sl2.add_parser("set"); sl2_set.add_argument("path"); sl2_set.set_defaults(func=cmd_lang)
 
+    sph = sub.add_parser("phenom")
+    sph2 = sph.add_subparsers(dest="action", required=True)
+    sph2.add_parser("show").set_defaults(func=cmd_phenom)
+    sph_reset = sph2.add_parser("reset"); sph_reset.set_defaults(func=cmd_phenom)
+    sph_audit = sph2.add_parser("audit")
+    sph_audit.add_argument("--out", default="PHENOM_AUDIT_EXAMPLE.md")
+    sph_audit.add_argument("--log", default=str(LOG_FILE))
+    sph_audit.set_defaults(func=cmd_phenom)
+    sph_set = sph2.add_parser("set")
+    sph_set.add_argument("--enabled", choices=["on", "off"], default=None)
+    sph_set.add_argument("--min-samples", type=int, default=None)
+    sph_set.add_argument("--influence", type=float, default=None)
+    sph_set.set_defaults(func=cmd_phenom)
+
     sexp = sub.add_parser("export")
     sexp.add_argument("--out", default=None)
     sexp.set_defaults(func=cmd_export)
+
+    seth = sub.add_parser("ethics")
+    sethsub = seth.add_subparsers(dest="action", required=True)
+    sethsub.add_parser("show").set_defaults(func=cmd_ethics)
 
     scca = sub.add_parser("cca"); scca.set_defaults(func=cmd_cca)
 

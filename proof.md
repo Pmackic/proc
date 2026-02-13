@@ -222,6 +222,34 @@ Put plainly: if the phenomenological classification (disturbance taxonomy) is fi
 
 ---
 
+## 10.1 Lemma (Phenomenological Refinement Improves Effective Control)
+
+Let:
+- `Sigma` be the finite signature space of invariant classes `sigma = SIG(domain, label, trigger, theta)`.
+- `M` be a memory map assigning empirical action statistics to each `sigma`.
+- `A_top(sigma)` be the top-K fitness-ranked candidate actions for signature `sigma`.
+
+Define the deployed policy:
+- baseline: `f0: U -> A` (fitness DSL only)
+- refined:  `fM: U -> A`, where `fM(u)` may replace `f0(u)` by an action in `A_top(sigma(u))` if:
+  - evidence `n(sigma) >= n_min`
+  - empirical score exceeds threshold `tau`.
+
+Then, for every signature class where the conditions hold:
+1) action choice remains inside the admissible set `A_top(sigma)` (safety envelope preserved),
+2) expected recovery utility is non-decreasing relative to baseline ranking under the empirical score order induced by `M`.
+
+Sketch:
+- Constraint (1) follows directly from `fM(u) in A_top(sigma(u))`.
+- For (2), replacement occurs only when memory score ranks an alternative above baseline and passes `tau`; otherwise `fM = f0`.
+- Therefore refinement is monotone on classes with sufficient evidence and neutral elsewhere.
+
+Design implication:
+- phenomenological memory does not require expanding the global action alphabet,
+- but increases discrimination of the observation-to-action map by conditioning on learned invariant classes.
+
+---
+
 ## 11. Homologija (Model–Observation)
 
 We define a homology-style correspondence between model space and observation space:
@@ -238,3 +266,63 @@ f: U -> A.
 ```
 
 The composed map `f ∘ h` is the operational homology between the model's disturbance classes and the regulator's action classes. If `h` collapses distinct phenomena (non-injective), or if `f` collapses distinct observation classes (non-injective), then distinct mechanisms become homologous under control and cannot be separated by action. This is exactly the condition that forces `|A| < |W_eff|` and yields inevitable feasibility loss for some disturbances.
+
+---
+
+## 12. Sailor Metaphor (Operational Interpretation)
+
+To make the control architecture concrete:
+
+- **Navigator (control core)** monitors feasibility/slack and redraws route when needed.
+- **First Mate (policy layer)** chooses baseline maneuvers from explicit ship rules (fitness DSL + goals).
+- **Old Sailor (phenomenology layer)** consults the logbook of similar wind/current signatures and may switch to a better maneuver only when evidence is sufficient and only within approved top maneuvers.
+
+Interaction cycle:
+1) disturbance is observed,  
+2) Navigator checks whether ports are still reachable,  
+3) First Mate ranks standard responses,  
+4) Old Sailor optionally refines choice under evidence gates,  
+5) crew executes,  
+6) outcome is logged for future signatures.
+
+Meaning in proof terms:
+- safety envelope is preserved because refinement is constrained to admissible candidates,
+- adaptation improves through local empirical memory,
+- Ashby's variety condition remains the governing feasibility constraint.
+
+---
+
+## 13. Aristotelian Ethical Clarification (Unequal Mean)
+
+We model three regulation bands:
+- `P`: procrastinative delay band (deficiency of timely action),
+- `M`: engaged/flow-capable band (practical mean),
+- `O`: over-control burden band (excess pressure/annoyance).
+
+Define an asymmetric ethical loss:
+
+```
+L = a * Pr(P) + b * Pr(O) + c * Pr(s_t < 0)
+```
+
+with default ordering:
+
+```
+a > b >= 0,  c >> a
+```
+
+Interpretation:
+- `a > b` encodes the **unequal doctrine of the mean**: procrastination is penalized more strongly than moderate burden,
+- `c >> a` preserves feasibility primacy (slack violations dominate all soft tradeoffs).
+
+Proposition (asymmetric-center policy):
+If two admissible policies have equal feasibility risk and one has lower `Pr(P)` but slightly higher `Pr(O)`, then it is ethically preferred whenever:
+
+```
+a * DeltaPr(P) > b * DeltaPr(O).
+```
+
+This formalizes a procrastination-focused but non-coercive center:
+- not maximal intensity,
+- not permissive delay,
+- but a biased mean toward timely engaged activity, constrained by hard viability bounds.
