@@ -17,8 +17,13 @@ Companion example:
 - Course-correct events (n):
 - Phenomenology settings:
   - `enabled`:
+  - `mode` (`phi` or `fep`):
   - `min_samples (n_min)`:
   - `influence (tau)`:
+  - `lambda_procrast`:
+  - `mu_overcontrol`:
+  - `beta_ambiguity`:
+  - `eta_epistemic`:
 
 ---
 

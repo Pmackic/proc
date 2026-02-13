@@ -60,6 +60,43 @@ Operational rule:
 - optimize toward the center with unequal penalties, typically `penalty(procrastination) > penalty(annoyance)`,
 - while maintaining viability guards (`slack != neg`, recovery not persistently slow).
 
+### 0.3 Analogical atlas (Mihajlo Alas -> Aristotelian final cluster)
+From the system viewpoint, the same regulator can be read through multiple mathematical-physics analogies:
+
+1) **Dynamical-system analogy**  
+- state trajectory in a constrained phase space; procrastination is drift away from viable attractors.
+
+2) **Thermodynamic/entropy analogy**  
+- disturbances increase disorder in task execution; regulation injects structured work (negative entropy budget).
+
+3) **Variational/FEP analogy**  
+- action selection minimizes expected free-energy-style score under ethical asymmetry.
+
+4) **Information-theoretic analogy**  
+- observation channel reduces uncertainty; control channel must supply requisite response variety.
+
+5) **Homological/phenomenological analogy (Mihajlo Alas/Petrović)**  
+- episodes are grouped by invariant structural signatures; homologous cases share transferable corrective forms.
+
+6) **Control-theoretic analogy**  
+- homeostat defines admissible set; policy and phenomenology choose within constraints to preserve essential variables.
+
+7) **Cybernetic demon analogy (Maxwell-style, algorithmic)**  
+- the regulator acts as a bounded demon: it sorts disturbances by observation class and applies differential actions.
+
+8) **Autopoietic analogy**  
+- the system reproduces its own regulatory organization by recursive logging, memory updates, and policy retuning.
+
+Aristotelian final cluster (teleological interpretation):
+- **telos-feasible:** preserve viability (`slack >= 0`)
+- **telos-engaged:** sustain flow-capable action
+- **telos-proportion:** apply unequal mean (stronger anti-procrastination correction without coercive excess)
+- **telos-political:** keep agency rights (pause/quit/local autonomy)
+
+Algedonic coupling:
+- algedonic alarm (`ok/warning/critical`) is the bridge between these analogies and operation:
+  it signals when the demon-like sorter/autopoietic updater must shift from routine correction to structural redesign.
+
 ---
 
 ## 1) Ashby closed-loop formulation
@@ -330,11 +367,25 @@ Watchman spots trouble
   -> Safety officer blocks dangerous moves (homeostat)
   -> First Mate ranks remaining maneuvers (fitness+goals)
   -> Old Sailor checks logbook of similar seas (phenomenology)
-       if enough evidence: refine choice within approved maneuvers
+       computes one scalar per maneuver:
+         phi = p_viable - lambda_procrast*p_procrast - mu_overcontrol*p_overcontrol
+         with lambda_procrast > mu_overcontrol
+       if enough evidence and phi exceeds threshold: refine choice within approved maneuvers
   -> Crew executes
   -> Logkeeper records outcome
   -> Old Sailor updates logbook; Captain updates doctrine over time (NK tuning)
 ```
+
+Interpretation of the Old Sailor's scalar:
+- `p_viable`: empirical proxy that maneuver restores viable engagement
+- `p_procrast`: empirical risk of remaining in procrastinative delay
+- `p_overcontrol`: empirical risk of high burden/over-control
+- asymmetry (`lambda_procrast > mu_overcontrol`) implements the unequal mean:
+  procrastination is weighted as the primary deviation, while anti-coercion guardrails remain active.
+
+Optional FEP-style mode:
+- `score = phi - beta_ambiguity*ambiguity + eta_epistemic*epistemic`
+- this preserves the same ethical asymmetry while explicitly accounting for uncertainty and controlled exploration.
 
 ---
 

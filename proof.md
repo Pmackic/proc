@@ -326,3 +326,34 @@ This formalizes a procrastination-focused but non-coercive center:
 - not maximal intensity,
 - not permissive delay,
 - but a biased mean toward timely engaged activity, constrained by hard viability bounds.
+
+---
+
+## 14. Algedonic–Demon–Autopoietic Coupling
+
+Define:
+- `A_t in {ok, warning, critical}` as the algedonic channel,
+- `D_t` as the disturbance classifier/action router (bounded demon),
+- `M_t` as phenomenological memory and policy state (autopoietic organization).
+
+Coupling law (operational):
+
+```
+A_t = Psi(slack_t, drift_t, burden_t)
+```
+
+and update modes:
+- if `A_t = ok`: local correction, low-intensity memory update
+- if `A_t = warning`: tighter monitoring, elevated memory weighting
+- if `A_t = critical`: structural intervention (capacity/scope/deadline redesign), plus policy-memory reconfiguration
+
+Proposition (autopoietic viability under bounded demon):
+If (i) disturbance-action mapping preserves requisite variety in effective classes,
+(ii) algedonic escalation triggers structural redesign at `critical`,
+and (iii) memory updates remain inside safety envelope constraints,
+then the regulator can preserve organizational identity (same control architecture) while changing internal parameters to restore viability.
+
+Interpretation:
+- the demon is not an external oracle; it is the bounded classifier-controller inside the loop,
+- algedonic signaling is the escalation mechanism,
+- autopoiesis is the recursive self-maintenance of regulation rules under disturbance.

@@ -382,6 +382,16 @@ A design is ethically acceptable only if:
 - procrastination burden decreases over time,
 - burden costs remain within predeclared tolerances.
 
+### 12.4 Analogical reporting extension (physics -> categories -> politics)
+For theory-consistent reporting, include one short mapping table in studies:
+- disturbance/entropy indicators,
+- classifier/action differentiation (demon role),
+- algedonic state transitions (`ok/warning/critical`),
+- memory/policy recursion markers (autopoietic maintenance),
+- Aristotelian final-cluster outcomes (feasible, engaged, proportionate, agency-preserving).
+
+This keeps philosophical interpretation tethered to measurable system artifacts rather than narrative-only claims.
+
 ---
 
 ## 13) Reporting checklist (what to include in papers)

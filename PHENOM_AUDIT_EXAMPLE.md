@@ -7,18 +7,22 @@ This example is pre-filled from `.prok_log.jsonl` as of 2026-02-13.
 ## 1) Study metadata
 
 - Study ID: `local-auto-audit`
-- Dataset window: `2026-02-04 to 2026-02-12`
+- Dataset window: `2026-02-04 to 2026-02-13`
 - Participants (n): `1`
-- Sessions (n): `5`
-- Course-correct events (n): `9`
+- Sessions (n): `6`
+- Course-correct events (n): `10`
 - Phenomenology settings at audit time (`.prok_state.json`):
   - `enabled`: `true`
   - `min_samples (n_min)`: `3`
   - `influence (tau)`: `0.35`
+  - `mode`: `fep`
+  - `lambda_procrast`: `0.60`
+  - `mu_overcontrol`: `0.25`
+  - `beta_ambiguity`: `0.20`
+  - `eta_epistemic`: `0.10`
 
 Note:
-- Log events are legacy/pre-phenomenology for intervention events; no `phenomenology_signature` fields are present.
-- Log events are legacy/pre-phenomenology for intervention events; no `selection_source` fields are present.
+- Phenomenology fields detected in intervention events.
 
 ---
 
@@ -26,19 +30,19 @@ Note:
 
 ### A) Coverage and sparsity
 
-- Signature count `|Sigma|`: `9`
-- Events mapped to signatures: `9 / 9 = 1.00`
-- Evidence-qualified coverage (`n(signature) >= n_min`): `0 / 9 = 0.00`
+- Signature count `|Sigma|`: `10`
+- Events mapped to signatures: `10 / 10 = 1.00`
+- Evidence-qualified coverage (`n(signature) >= n_min`): `0 / 10 = 0.00`
 - Median events per signature: `1`
 - P90 events per signature: `1`
 - Gini over signature counts: `0.00`
 
 ### B) Override behavior
 
-- Candidate decisions total: `9`
-- Baseline-only selections (`selection_source=fitness`): `N/A (legacy schema)`
+- Candidate decisions total: `10`
+- Baseline-only selections (`selection_source=fitness`): `1`
 - Phenomenology selections (`selection_source=fitness+phenomenology`): `0`
-- Override rate: `0 / 9 = 0.00`
+- Override rate: `0 / 10 = 0.00`
 - Confidence-gated rejection count: `N/A`
 
 ### C) Outcome deltas
@@ -70,6 +74,7 @@ Delta block:
 | unknown|PROCRASTINATION|confusion|EMVMDNGL | 1 | no | E_RECOVERY | 0 | N/A | N/A |
 | unknown|PROCRASTINATION|fatigue|EMVLDNGL | 1 | no | E_RECOVERY | 0 | N/A | 2.00 |
 | work|DRIFT|distraction|EHVMDNGL | 1 | no | E_RECOVERY | 1 | 1.00 | 3.00 |
+| work|PROCRASTINATION|confusion|ELVMDFGL | 1 | no | E_RECOVERY | 0 | N/A | N/A |
 | work|PROCRASTINATION|fatigue|EMVMDNGL | 1 | no | E_RECOVERY | 1 | 0.00 | 1.00 |
 
 ### T2) Action comparison by selection source
@@ -77,6 +82,7 @@ Delta block:
 | selection_source | events_n | helped_yes_n | helped_rated_n | helped_rate | burden_n | burden_avg | time_to_recover_avg |
 |---|---:|---:|---:|---:|---:|---:|---|
 | fitness (inferred, legacy) | 9 | 3 | 4 | 0.75 | 5 | 2.20 | N/A |
+| fitness | 1 | 0 | 0 | N/A | 0 | N/A | N/A |
 
 ### T3) Trigger/domain stratification
 
@@ -89,6 +95,7 @@ Delta block:
 | unknown | confusion | fitness (inferred, legacy) | 1 | N/A | N/A |
 | unknown | distraction | fitness (inferred, legacy) | 1 | N/A | N/A |
 | unknown | fatigue | fitness (inferred, legacy) | 1 | N/A | 2.00 |
+| work | confusion | fitness | 1 | N/A | N/A |
 | work | distraction | fitness (inferred, legacy) | 1 | 1.00 | 3.00 |
 | work | fatigue | fitness (inferred, legacy) | 1 | 0.00 | 1.00 |
 

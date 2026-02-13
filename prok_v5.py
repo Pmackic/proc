@@ -227,6 +227,11 @@ def default_phenomenology() -> Dict[str, Any]:
         "enabled": True,
         "min_samples": 3,
         "influence": 0.35,
+        "mode": "fep",  # phi|fep
+        "lambda_procrast": 0.60,
+        "mu_overcontrol": 0.25,
+        "beta_ambiguity": 0.20,
+        "eta_epistemic": 0.10,
         "signatures": {},
     }
 
@@ -648,6 +653,14 @@ def _init_defaults(st: ProkState) -> None:
     if "enabled" not in st.phenomenology: st.phenomenology["enabled"] = True
     if "min_samples" not in st.phenomenology: st.phenomenology["min_samples"] = 3
     if "influence" not in st.phenomenology: st.phenomenology["influence"] = 0.35
+    if "mode" not in st.phenomenology: st.phenomenology["mode"] = "fep"
+    st.phenomenology["mode"] = str(st.phenomenology.get("mode") or "fep").lower()
+    if st.phenomenology["mode"] not in ("phi", "fep"):
+        st.phenomenology["mode"] = "fep"
+    if "lambda_procrast" not in st.phenomenology: st.phenomenology["lambda_procrast"] = 0.60
+    if "mu_overcontrol" not in st.phenomenology: st.phenomenology["mu_overcontrol"] = 0.25
+    if "beta_ambiguity" not in st.phenomenology: st.phenomenology["beta_ambiguity"] = 0.20
+    if "eta_epistemic" not in st.phenomenology: st.phenomenology["eta_epistemic"] = 0.10
     if "signatures" not in st.phenomenology or not isinstance(st.phenomenology.get("signatures"), dict):
         st.phenomenology["signatures"] = {}
     if st.domains is None: st.domains = {}
@@ -857,29 +870,64 @@ def phenomenology_signature(task: Task, label: str, trigger: str) -> str:
     dom = (task.domain or "general").lower()
     return f"{dom}|{label}|{trigger}|E{theta.E}V{theta.V}D{theta.D}G{theta.G}"
 
-def _phenomenology_action_score(stats: Dict[str, Any]) -> Tuple[float, int]:
+def _phenomenology_action_score(
+    stats: Dict[str, Any],
+    mode: str,
+    lambda_procrast: float,
+    mu_overcontrol: float,
+    beta_ambiguity: float,
+    eta_epistemic: float,
+) -> Tuple[float, int, Dict[str, float]]:
     rated = _to_int(stats.get("rated_helped"), 0)
     yes = _to_int(stats.get("helped_yes"), 0)
     burden_n = _to_int(stats.get("burden_n"), 0)
     burden_sum = _to_float(stats.get("burden_sum"), 0.0)
+    tries = _to_int(stats.get("tries"), 0)
+    procrast_n = _to_int(stats.get("procrastination_events"), 0)
+    high_burden_n = _to_int(stats.get("high_burden_n"), 0)
 
-    success = (yes + 1.0) / (rated + 2.0)  # Laplace smoothing
-    if burden_n > 0:
-        burden_avg = burden_sum / max(1, burden_n)
-        burden_penalty = (burden_avg - 1.0) / 4.0
-    else:
-        burden_penalty = 0.0
-    return success - 0.2 * burden_penalty, rated
+    # Single-value transformation (phi):
+    # viable - lambda*procrast_risk - mu*overcontrol_risk
+    p_viable = (yes + 1.0) / (rated + 2.0)  # helped as viability proxy
+    p_procrast = (procrast_n + 1.0) / (tries + 2.0)
+    p_overcontrol = (high_burden_n + 1.0) / (burden_n + 2.0)
+    phi = p_viable - float(lambda_procrast) * p_procrast - float(mu_overcontrol) * p_overcontrol
+    # Uncertainty/exploration terms for lightweight active-inference-style selection.
+    denom = max(1e-9, 1.0 + float(lambda_procrast) + float(mu_overcontrol))
+    ambiguity = (
+        (p_viable * (1.0 - p_viable))
+        + float(lambda_procrast) * (p_procrast * (1.0 - p_procrast))
+        + float(mu_overcontrol) * (p_overcontrol * (1.0 - p_overcontrol))
+    ) / denom
+    epistemic = 1.0 / math.sqrt(max(1.0, float(tries) + 1.0))
+
+    score = phi
+    if str(mode).lower() == "fep":
+        score = phi - float(beta_ambiguity) * ambiguity + float(eta_epistemic) * epistemic
+    return score, rated, {
+        "mode": str(mode).lower(),
+        "phi": phi,
+        "ambiguity": ambiguity,
+        "epistemic": epistemic,
+        "p_viable": p_viable,
+        "p_procrast": p_procrast,
+        "p_overcontrol": p_overcontrol,
+    }
 
 def phenomenology_recommendation(
     st: ProkState,
     signature: str,
     candidate_names: List[str],
-) -> Optional[Tuple[str, float, int]]:
+) -> Optional[Tuple[str, float, int, Dict[str, float]]]:
     ph = st.phenomenology or {}
     if not bool(ph.get("enabled", True)):
         return None
     min_samples = max(1, _to_int(ph.get("min_samples"), 3))
+    mode = str(ph.get("mode") or "fep").lower()
+    lambda_procrast = _to_float(ph.get("lambda_procrast"), 0.60)
+    mu_overcontrol = _to_float(ph.get("mu_overcontrol"), 0.25)
+    beta_ambiguity = _to_float(ph.get("beta_ambiguity"), 0.20)
+    eta_epistemic = _to_float(ph.get("eta_epistemic"), 0.10)
     entry = (ph.get("signatures") or {}).get(signature) or {}
     actions = entry.get("actions") or {}
     allowed = set(candidate_names)
@@ -887,25 +935,35 @@ def phenomenology_recommendation(
     best_name = None
     best_score = -1e9
     best_n = 0
+    best_components: Dict[str, float] = {}
     for name, stats in actions.items():
         if name not in allowed:
             continue
-        score, rated = _phenomenology_action_score(stats)
+        score, rated, components = _phenomenology_action_score(
+            stats,
+            mode=mode,
+            lambda_procrast=lambda_procrast,
+            mu_overcontrol=mu_overcontrol,
+            beta_ambiguity=beta_ambiguity,
+            eta_epistemic=eta_epistemic,
+        )
         if rated < min_samples:
             continue
         if score > best_score:
             best_name = name
             best_score = score
             best_n = rated
+            best_components = components
     if not best_name:
         return None
-    return best_name, best_score, best_n
+    return best_name, best_score, best_n, best_components
 
 def phenomenology_record_outcome(
     st: ProkState,
     signature: str,
     chosen: str,
     ratings: Dict[str, Any],
+    label: str,
 ) -> None:
     ph = st.phenomenology or {}
     sigs = ph.setdefault("signatures", {})
@@ -918,15 +976,22 @@ def phenomenology_record_outcome(
         "helped_yes": 0,
         "burden_n": 0,
         "burden_sum": 0.0,
+        "procrastination_events": 0,
+        "high_burden_n": 0,
     })
     a["tries"] = _to_int(a.get("tries"), 0) + 1
+    if str(label).upper() == "PROCRASTINATION":
+        a["procrastination_events"] = _to_int(a.get("procrastination_events"), 0) + 1
     if ratings.get("helped") is not None:
         a["rated_helped"] = _to_int(a.get("rated_helped"), 0) + 1
         if bool(ratings.get("helped")):
             a["helped_yes"] = _to_int(a.get("helped_yes"), 0) + 1
     if ratings.get("burden") is not None:
         a["burden_n"] = _to_int(a.get("burden_n"), 0) + 1
-        a["burden_sum"] = _to_float(a.get("burden_sum"), 0.0) + float(ratings.get("burden"))
+        b = float(ratings.get("burden"))
+        a["burden_sum"] = _to_float(a.get("burden_sum"), 0.0) + b
+        if b >= 4.0:
+            a["high_burden_n"] = _to_int(a.get("high_burden_n"), 0) + 1
 
 def _load_log_records(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
@@ -1028,12 +1093,21 @@ def build_phenom_audit_markdown(st: ProkState, records: List[Dict[str, Any]], lo
     def best_action(actions: Dict[str, Any]) -> Tuple[str, int, Optional[float], Optional[float]]:
         best = ("UNKNOWN", -1e9, 0, None, None)
         for name, stx in actions.items():
-            score, rated = _phenomenology_action_score({
+            score, rated, _ = _phenomenology_action_score({
                 "rated_helped": stx.get("rated_helped", 0),
                 "helped_yes": stx.get("helped_yes", 0),
                 "burden_n": len(stx.get("burden", [])),
                 "burden_sum": sum(stx.get("burden", [])),
-            })
+                "tries": stx.get("tries", 0),
+                "procrastination_events": stx.get("procrastination_events", 0),
+                "high_burden_n": stx.get("high_burden_n", 0),
+            },
+                mode=str(ph.get("mode") or "fep").lower(),
+                lambda_procrast=_to_float(ph.get("lambda_procrast"), 0.60),
+                mu_overcontrol=_to_float(ph.get("mu_overcontrol"), 0.25),
+                beta_ambiguity=_to_float(ph.get("beta_ambiguity"), 0.20),
+                eta_epistemic=_to_float(ph.get("eta_epistemic"), 0.10),
+            )
             hr = _safe_rate(stx.get("helped_yes", 0), stx.get("rated_helped", 0))
             ba = _safe_avg(stx.get("burden", []))
             if score > best[1]:
@@ -1086,6 +1160,11 @@ def build_phenom_audit_markdown(st: ProkState, records: List[Dict[str, Any]], lo
     lines.append(f"  - `enabled`: `{str(bool(ph.get('enabled', True))).lower()}`")
     lines.append(f"  - `min_samples (n_min)`: `{n_min}`")
     lines.append(f"  - `influence (tau)`: `{tau:.2f}`")
+    lines.append(f"  - `mode`: `{str(ph.get('mode') or 'fep').lower()}`")
+    lines.append(f"  - `lambda_procrast`: `{_to_float(ph.get('lambda_procrast'), 0.60):.2f}`")
+    lines.append(f"  - `mu_overcontrol`: `{_to_float(ph.get('mu_overcontrol'), 0.25):.2f}`")
+    lines.append(f"  - `beta_ambiguity`: `{_to_float(ph.get('beta_ambiguity'), 0.20):.2f}`")
+    lines.append(f"  - `eta_epistemic`: `{_to_float(ph.get('eta_epistemic'), 0.10):.2f}`")
     lines.append("")
     lines.append("Note:")
     lines.append(notes_block)
@@ -1712,18 +1791,31 @@ def run_session(
         ranked = rank_candidates_scored(prog, candidates)
         best = ranked[0][1]
         selection_source = "fitness"
+        phenom_mode = str((st.phenomenology or {}).get("mode") or "fep").lower()
+        phenom_score: Optional[float] = None
+        phenom_components: Optional[Dict[str, float]] = None
 
         shortlist = [c for _, c in ranked[:3]]
         rec = phenomenology_recommendation(st, signature, [c["name"] for c in shortlist])
         if rec:
-            rec_name, rec_score, rec_n = rec
+            rec_name, rec_score, rec_n, rec_components = rec
+            phenom_score = rec_score
+            phenom_components = rec_components
             influence = _to_float((st.phenomenology or {}).get("influence"), 0.35)
             if rec_name != best["name"] and rec_score >= influence:
                 alt = next((c for c in shortlist if c["name"] == rec_name), None)
                 if alt is not None:
                     best = alt
                     selection_source = "fitness+phenomenology"
-                    print(f"Phenomenology match: using {rec_name} (score={rec_score:.2f}, n={rec_n}).")
+                    print(
+                        f"Phenomenology match: using {rec_name} "
+                        f"(mode={phenom_mode}, score={rec_score:.2f}, n={rec_n}, "
+                        f"phi={rec_components.get('phi', 0.0):.2f}, "
+                        f"amb={rec_components.get('ambiguity', 0.0):.2f}, epi={rec_components.get('epistemic', 0.0):.2f}, "
+                        f"v={rec_components.get('p_viable', 0.0):.2f}, "
+                        f"p={rec_components.get('p_procrast', 0.0):.2f}, "
+                        f"o={rec_components.get('p_overcontrol', 0.0):.2f})."
+                    )
 
         task.tmt_bins = best["theta_next"]
         if random_checks:
@@ -1761,10 +1853,13 @@ def run_session(
             "chosen": best["name"],
             "selection_source": selection_source,
             "phenomenology_signature": signature,
+            "phenom_mode": phenom_mode,
+            "phenom_score": phenom_score,
+            "phenom_components": phenom_components,
             "gaps": [min_gap, max_gap] if random_checks else None,
             **ratings,
         })
-        phenomenology_record_outcome(st, signature, best["name"], ratings)
+        phenomenology_record_outcome(st, signature, best["name"], ratings, label=label)
 
         ds.recovery_counts[best["name"]] = _to_int(ds.recovery_counts.get(best["name"]), 0) + 1
 
@@ -2358,6 +2453,11 @@ def cmd_phenom(args) -> None:
             "enabled": bool(ph.get("enabled", True)),
             "min_samples": _to_int(ph.get("min_samples"), 3),
             "influence": _to_float(ph.get("influence"), 0.35),
+            "mode": str(ph.get("mode") or "fep").lower(),
+            "lambda_procrast": _to_float(ph.get("lambda_procrast"), 0.60),
+            "mu_overcontrol": _to_float(ph.get("mu_overcontrol"), 0.25),
+            "beta_ambiguity": _to_float(ph.get("beta_ambiguity"), 0.20),
+            "eta_epistemic": _to_float(ph.get("eta_epistemic"), 0.10),
             "signatures": len(sigs),
         }))
         if not sigs:
@@ -2370,16 +2470,30 @@ def cmd_phenom(args) -> None:
             best_name = "-"
             best_score = -1e9
             best_n = 0
+            best_comp: Dict[str, float] = {}
             for name, stats in actions.items():
-                score, rated = _phenomenology_action_score(stats or {})
+                score, rated, comp = _phenomenology_action_score(
+                    stats or {},
+                    mode=str(ph.get("mode") or "fep").lower(),
+                    lambda_procrast=_to_float(ph.get("lambda_procrast"), 0.60),
+                    mu_overcontrol=_to_float(ph.get("mu_overcontrol"), 0.25),
+                    beta_ambiguity=_to_float(ph.get("beta_ambiguity"), 0.20),
+                    eta_epistemic=_to_float(ph.get("eta_epistemic"), 0.10),
+                )
                 if rated > 0 and score > best_score:
                     best_name = name
                     best_score = score
                     best_n = rated
+                    best_comp = comp
             if best_name == "-":
                 print(f"  {sig} | n={_to_int(entry.get('n'), 0)} | best=-")
             else:
-                print(f"  {sig} | n={_to_int(entry.get('n'), 0)} | best={best_name} score={best_score:.2f} rated={best_n}")
+                print(
+                    f"  {sig} | n={_to_int(entry.get('n'), 0)} | best={best_name} "
+                    f"score={best_score:.2f} rated={best_n} mode={best_comp.get('mode', 'fep')} "
+                    f"(phi={best_comp.get('phi', 0.0):.2f}, amb={best_comp.get('ambiguity', 0.0):.2f}, epi={best_comp.get('epistemic', 0.0):.2f}, "
+                    f"v={best_comp.get('p_viable', 0.0):.2f}, p={best_comp.get('p_procrast', 0.0):.2f}, o={best_comp.get('p_overcontrol', 0.0):.2f})"
+                )
         return
 
     if args.action == "audit":
@@ -2394,10 +2508,22 @@ def cmd_phenom(args) -> None:
     if args.action == "set":
         if args.enabled is not None:
             ph["enabled"] = (str(args.enabled).lower() == "on")
+        if args.mode is not None:
+            md = str(args.mode).lower()
+            if md in ("phi", "fep"):
+                ph["mode"] = md
         if args.min_samples is not None:
             ph["min_samples"] = max(1, _to_int(args.min_samples, _to_int(ph.get("min_samples"), 3)))
         if args.influence is not None:
             ph["influence"] = max(0.0, min(1.0, _to_float(args.influence, _to_float(ph.get("influence"), 0.35))))
+        if args.lambda_procrast is not None:
+            ph["lambda_procrast"] = max(0.0, min(2.0, _to_float(args.lambda_procrast, _to_float(ph.get("lambda_procrast"), 0.60))))
+        if args.mu_overcontrol is not None:
+            ph["mu_overcontrol"] = max(0.0, min(2.0, _to_float(args.mu_overcontrol, _to_float(ph.get("mu_overcontrol"), 0.25))))
+        if args.beta_ambiguity is not None:
+            ph["beta_ambiguity"] = max(0.0, min(2.0, _to_float(args.beta_ambiguity, _to_float(ph.get("beta_ambiguity"), 0.20))))
+        if args.eta_epistemic is not None:
+            ph["eta_epistemic"] = max(0.0, min(2.0, _to_float(args.eta_epistemic, _to_float(ph.get("eta_epistemic"), 0.10))))
         st.phenomenology = ph
         save_state(st)
         print("Phenomenology settings updated.")
@@ -2408,6 +2534,11 @@ def cmd_phenom(args) -> None:
             "enabled": bool(ph.get("enabled", True)),
             "min_samples": max(1, _to_int(ph.get("min_samples"), 3)),
             "influence": max(0.0, min(1.0, _to_float(ph.get("influence"), 0.35))),
+            "mode": str(ph.get("mode") or "fep").lower(),
+            "lambda_procrast": max(0.0, min(2.0, _to_float(ph.get("lambda_procrast"), 0.60))),
+            "mu_overcontrol": max(0.0, min(2.0, _to_float(ph.get("mu_overcontrol"), 0.25))),
+            "beta_ambiguity": max(0.0, min(2.0, _to_float(ph.get("beta_ambiguity"), 0.20))),
+            "eta_epistemic": max(0.0, min(2.0, _to_float(ph.get("eta_epistemic"), 0.10))),
             "signatures": {},
         }
         st.phenomenology = keep
@@ -2444,7 +2575,9 @@ def cmd_ethics(args) -> None:
     print("- Deficiency risk: procrastination/avoidant delay (primary).")
     print("- Center target: sustainable engaged progress.")
     print("- Excess risk: over-control/annoyance burden.")
-    print("- Default asymmetry: penalty(procrastination) > penalty(annoyance),")
+    lam = _to_float(ph.get("lambda_procrast"), 0.60)
+    mu = _to_float(ph.get("mu_overcontrol"), 0.25)
+    print(f"- Default asymmetry: penalty(procrastination) > penalty(annoyance) [lambda={lam:.2f}, mu={mu:.2f}],")
     print("  with feasibility guards dominant (slack violations are critical).")
     print("")
     print("CURRENT RUNTIME GUARDRAILS:")
@@ -2452,9 +2585,82 @@ def cmd_ethics(args) -> None:
     print(f"- replan_threshold: {st.genome.get('g8_replan_threshold')}")
     print(f"- study_mode: {st.study_mode} (burden/helped ratings when enabled)")
     print(f"- phenomenology.enabled: {bool(ph.get('enabled', True))}")
+    print(f"- phenomenology.mode: {str(ph.get('mode') or 'fep').lower()}")
     print(f"- phenomenology.min_samples: {_to_int(ph.get('min_samples'), 3)}")
     print(f"- phenomenology.influence: {_to_float(ph.get('influence'), 0.35):.2f}")
+    print(f"- phenomenology.lambda_procrast: {lam:.2f}")
+    print(f"- phenomenology.mu_overcontrol: {mu:.2f}")
+    print(f"- phenomenology.beta_ambiguity: {_to_float(ph.get('beta_ambiguity'), 0.20):.2f}")
+    print(f"- phenomenology.eta_epistemic: {_to_float(ph.get('eta_epistemic'), 0.10):.2f}")
     print(f"- use_cca: {st.use_cca} (placeholder only)")
+
+def cmd_phase(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    records = _load_log_records(LOG_FILE)
+    level, reasons = compute_alarm(st)
+
+    active = get_task_by_id(st, st.active_task_id) if st.active_task_id else None
+    tasks_with_deadline = [t for t in st.tasks if t.deadline]
+    slack_map = {t.id: task_slack_blocks(st, t) for t in tasks_with_deadline}
+    min_slack = min(slack_map.values()) if slack_map else 0
+    active_slack = task_slack_blocks(st, active) if (active and active.deadline) else None
+
+    drift_events = [r for r in records if str(r.get("kind")) in ("course_correct", "d", "p")]
+    recent = drift_events[-20:]
+    procrast_recent = sum(1 for r in recent if str(r.get("label") or "").upper() == "PROCRASTINATION")
+    drift_recent = sum(1 for r in recent if str(r.get("label") or "").upper() == "DRIFT")
+    burden_vals = [float(r.get("burden")) for r in recent if isinstance(r.get("burden"), (int, float))]
+    burden_avg = _safe_avg(burden_vals)
+
+    # Direction proxy: compare last 10 vs previous 10 disturbance burden.
+    tail = drift_events[-10:]
+    prev = drift_events[-20:-10]
+    tail_p = sum(1 for r in tail if str(r.get("label") or "").upper() == "PROCRASTINATION")
+    prev_p = sum(1 for r in prev if str(r.get("label") or "").upper() == "PROCRASTINATION")
+    if len(tail) >= 3 and len(prev) >= 3:
+        if tail_p < prev_p:
+            direction = "toward_viable_attractor"
+        elif tail_p > prev_p:
+            direction = "away_from_viable_attractor"
+        else:
+            direction = "neutral"
+    else:
+        direction = "unknown_insufficient_history"
+
+    ph = st.phenomenology or {}
+    if level == "critical":
+        controller_mode = "structural"
+    elif level == "warning":
+        controller_mode = "corrective"
+    else:
+        controller_mode = "routine"
+
+    phase_vec = {
+        "time": _iso_today(),
+        "active_task_id": active.id if active else None,
+        "active_domain": active.domain if active else None,
+        "slack_active_blocks": active_slack,
+        "slack_min_blocks": int(min_slack),
+        "task_drift_active": int(active.recent_drift_count) if active else None,
+        "domain_drift_ema_active": (
+            _to_float(get_domain_state(st, active.domain).drift_ema, 0.0) if active else None
+        ),
+        "procrastination_recent_20": int(procrast_recent),
+        "drift_recent_20": int(drift_recent),
+        "burden_recent_avg": None if burden_avg is None else round(burden_avg, 2),
+        "alarm": level,
+        "controller_mode": controller_mode,
+        "phenom_mode": str(ph.get("mode") or "fep").lower(),
+    }
+    print(_json_dump(phase_vec))
+
+    print("Phase interpretation:")
+    print(f"- Distance to viability boundary (blocks): {min_slack}")
+    print(f"- Attractor direction: {direction}")
+    if reasons:
+        print("- Active constraints:")
+        for r in reasons[:3]:
+            print(f"  - {r}")
 
 # ----------------------------
 # Parser
@@ -2594,13 +2800,22 @@ def build_parser() -> argparse.ArgumentParser:
     sph_audit.set_defaults(func=cmd_phenom)
     sph_set = sph2.add_parser("set")
     sph_set.add_argument("--enabled", choices=["on", "off"], default=None)
+    sph_set.add_argument("--mode", choices=["phi", "fep"], default=None)
     sph_set.add_argument("--min-samples", type=int, default=None)
     sph_set.add_argument("--influence", type=float, default=None)
+    sph_set.add_argument("--lambda-procrast", type=float, default=None)
+    sph_set.add_argument("--mu-overcontrol", type=float, default=None)
+    sph_set.add_argument("--beta-ambiguity", type=float, default=None)
+    sph_set.add_argument("--eta-epistemic", type=float, default=None)
     sph_set.set_defaults(func=cmd_phenom)
 
     sexp = sub.add_parser("export")
     sexp.add_argument("--out", default=None)
     sexp.set_defaults(func=cmd_export)
+
+    sphase = sub.add_parser("phase")
+    sphase_sub = sphase.add_subparsers(dest="action", required=True)
+    sphase_sub.add_parser("show").set_defaults(func=cmd_phase)
 
     seth = sub.add_parser("ethics")
     sethsub = seth.add_subparsers(dest="action", required=True)

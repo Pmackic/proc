@@ -235,7 +235,11 @@ python prok_v5.py phenom show
 
 Tune influence:
 ```bash
-python prok_v5.py phenom set --enabled on --min-samples 3 --influence 0.35
+python prok_v5.py phenom set --enabled on --mode fep --min-samples 3 --influence 0.35
+# optional asymmetric mean weights:
+python prok_v5.py phenom set --lambda-procrast 0.60 --mu-overcontrol 0.25
+# optional FEP uncertainty/exploration weights:
+python prok_v5.py phenom set --beta-ambiguity 0.20 --eta-epistemic 0.10
 ```
 
 Clear learned signatures (keep settings):
@@ -255,6 +259,11 @@ Selection behavior:
 - phenomenology can override within the top candidates only when enough evidence exists
 - evidence gate is controlled by `--min-samples`
 - override sensitivity is controlled by `--influence` (0..1)
+- single-value transformation per signature/action:
+  - `phi = p_viable - lambda_procrast*p_procrast - mu_overcontrol*p_overcontrol`
+  - default asymmetry: `lambda_procrast > mu_overcontrol`
+- in `--mode fep`, score adds uncertainty + learning terms:
+  - `score = phi - beta_ambiguity*ambiguity + eta_epistemic*epistemic`
 
 Logs:
 - `course_correct` events now include `phenomenology_signature` and `selection_source`
@@ -319,4 +328,9 @@ Ethical stance (short):
 Show current doctrine + guardrails:
 ```bash
 python prok_v5.py ethics show
+```
+
+Phase-space snapshot:
+```bash
+python prok_v5.py phase show
 ```
