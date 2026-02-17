@@ -59,6 +59,7 @@ PROK v5 implements an Ashby regulator loop:
 PROK v5 should be analyzed as three coupled layers:
 1) **Control core**: feasibility preservation via slack, replanning, and alarm channel  
 2) **Policy layer**: fitness DSL + goal profile ρ (explicit ranking of acceptable actions)  
+2b) **System 2 coordination layer**: anti-oscillation damping service across operational units/tasks  
 3) **Phenomenology layer**: signature-based homology memory that transfers empirically successful recoveries across structurally similar episodes
 
 This decomposition is methodologically important:
@@ -82,6 +83,7 @@ Integrated model components (evaluated within the study, not as separate tracks)
 - decision reason codes for per-step auditability,
 - staleness/confidence decay in signature and NK memory,
 - incremental online updates for large-log operation.
+- System 2 damping controls (minimum stick time, max switches/day, current-task preference) with explicit override tracking.
 
 ### Discrete motivational layer (TMT bins)
 Discrete bins:  
@@ -293,6 +295,10 @@ Rotate “one-gene mutations” across days/weeks to estimate main effects and k
 - Randomize energy-aware routing vs context-agnostic routing.
 - Randomize memory-decay settings to test staleness handling.
 - Evaluate user policy constraints (check caps/no-prompt windows) as enforced policy conditions.
+- Evaluate System 2 damping settings:
+  - min stick time,
+  - max switches/day,
+  - current-task preference under non-urgent conditions.
 
 ### 8.3 Analyses
 - MRT proximal outcomes: **WCLS** or **GEE**, with moderators (trigger, RCQ scales)

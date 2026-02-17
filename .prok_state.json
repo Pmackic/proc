@@ -88,7 +88,7 @@
   "datetime_blackouts": [],
   "today_min_done": false,
   "last_min_date": "2026-02-17",
-  "streak": 2,
+  "streak": 0,
   "last_streak_date": "2026-02-05",
   "genome": {
     "version": 2,
@@ -177,7 +177,68 @@
         "g9"
       ]
     },
-    "main": {},
+    "main": {
+      "g1_profile": {
+        "balanced": {
+          "sum": 20,
+          "n": 1
+        }
+      },
+      "g2_profile": {
+        "balanced": {
+          "sum": 20,
+          "n": 1
+        }
+      },
+      "g3_tightening": {
+        "mild": {
+          "sum": 20,
+          "n": 1
+        }
+      },
+      "g4_classifier": {
+        "balanced": {
+          "sum": 20,
+          "n": 1
+        }
+      },
+      "g5_routing": {
+        "trigger": {
+          "sum": 20,
+          "n": 1
+        }
+      },
+      "g6_near_reward": {
+        "True": {
+          "sum": 20,
+          "n": 1
+        }
+      },
+      "g7_artifact": {
+        "5bullets": {
+          "sum": 20,
+          "n": 1
+        }
+      },
+      "g8_replan_threshold": {
+        "1": {
+          "sum": 20,
+          "n": 1
+        }
+      },
+      "g9_pause_policy": {
+        "soft": {
+          "sum": 20,
+          "n": 1
+        }
+      },
+      "g10_explore": {
+        "off": {
+          "sum": 20,
+          "n": 1
+        }
+      }
+    },
     "pair": {},
     "last_genotype": {
       "g1_profile": "balanced",
@@ -192,10 +253,37 @@
       "g10_explore": "off"
     },
     "last_source": "exploit",
-    "last_pred_score": 0.0,
-    "history": []
+    "last_pred_score": 14.0,
+    "history": [
+      {
+        "ts": "2026-02-17T14:35:58",
+        "utility": 0.2,
+        "u_int": 20,
+        "genotype": {
+          "g1_profile": "balanced",
+          "g2_profile": "balanced",
+          "g3_tightening": "mild",
+          "g4_classifier": "balanced",
+          "g5_routing": "trigger",
+          "g6_near_reward": true,
+          "g7_artifact": "5bullets",
+          "g8_replan_threshold": 1,
+          "g9_pause_policy": "soft",
+          "g10_explore": "off"
+        },
+        "source": "exploit"
+      }
+    ]
   },
-  "domains": {},
+  "domains": {
+    "work": {
+      "preferred_block_min": null,
+      "preferred_check_min_gap": null,
+      "preferred_check_max_gap": null,
+      "drift_ema": 0.0,
+      "recovery_counts": {}
+    }
+  },
   "participant_id": "P001",
   "study_mode": true,
   "goal_profile": {
@@ -254,9 +342,27 @@
   "use_cca": false,
   "cca_model_path": null,
   "policy_constraints": {
-    "max_checks_per_hour": 8,
-    "quiet_windows": [
-      "14:00-15:00"
-    ]
+    "max_checks_per_hour": 10,
+    "quiet_windows": []
+  },
+  "risk_model": {
+    "intercept": -1.0,
+    "w_neg_slack": 2.0,
+    "w_zero_slack": 1.2,
+    "w_low_slack": 0.8,
+    "w_drift_cluster": 0.8,
+    "w_recent_drift": 0.3,
+    "w_deadline_near": 0.7,
+    "w_days_urgency": 1.2,
+    "w_slack_buffer": 1.5,
+    "w_remaining_load": 0.8,
+    "cut_med": 0.34,
+    "cut_high": 0.67
+  },
+  "system2": {
+    "enabled": true,
+    "min_task_stick_min": 25,
+    "max_switches_per_day": 4,
+    "prefer_current_if_not_urgent": true
   }
 }

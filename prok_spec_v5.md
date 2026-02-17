@@ -37,6 +37,18 @@ System does:
 - optional CCA mapping **exists as an interface** but is OFF in v5
 - compute algedonic alarm (ok/warning/critical) from slack + drift
 
+### 0.4 VSM system mapping (normative architecture)
+For this project, the Viable System Model mapping is:
+- **System 1 (Operations):** per-task operational loops (task execution, check/self-report, recovery transforms).
+- **System 2 (Coordination):** anti-oscillation coordination across System-1 units (switch damping, protocol stabilization, quiet-window/check-rate arbitration).
+- **System 3 (Inside-and-now control):** today-level resource governance under constraints (daily feasibility, minimum required today, advisory allocation).
+- **System 4 (Outside-and-then intelligence):** horizon adaptation and forecasting (deadline risk, multi-day simulation/counterfactual planning, scenario exploration).
+- **System 5 (Policy/identity):** ethical-governance layer (homeostat safety doctrine, asymmetry constraints, autonomy rights and override boundaries).
+
+Design rule:
+- System 2 is a **service** to System 1 (damping oscillations), not a command substitute.
+- System 5 constrains admissibility (identity/ethics), while System 3 and System 4 arbitrate present vs future under those constraints.
+
 ### 0.1 Ethical clarification (Aristotelian framing)
 This regulator is normatively oriented to practical agency, not mere output.
 
@@ -375,6 +387,9 @@ Watchman spots trouble
          with lambda_procrast > mu_overcontrol
        if enough evidence and phi exceeds threshold: refine choice within approved maneuvers
   -> Crew executes
+  -> Watch Coordinator synchronizes stations (System 2 damping)
+       prevents harmful thrashing between stations,
+       enforces rhythm/protocol constraints for stable coordination
   -> Logkeeper records outcome
   -> Old Sailor updates logbook; Captain updates doctrine over time (NK tuning)
 ```
@@ -435,10 +450,22 @@ DAG config is set through `phenom set`:
 - Policy constraints during sessions:
   - check-rate cap (`max_checks_per_hour`)
   - quiet windows where checks are suppressed.
+  - skipped-check reasons logged and surfaced in status observability summary.
 - Decision-trace logging:
   - reason codes and candidate ranking traces in `course_correct` events.
 - Counterfactual planning probe:
   - `simulate --minutes-today ...` estimates slack/risk deltas under alternative effort today.
+  - without `--task`, minutes are treated as one fixed budget allocated across deadline tasks.
+- System 2 coordination layer (Beer-aligned, implemented):
+  - purpose: damping inter-unit/task oscillations, not command/control.
+  - runtime damping rules:
+    - minimum stick time before switching tasks,
+    - maximum task switches per day,
+    - optional preference for current task when urgency is not higher elsewhere.
+  - user autonomy preserved via explicit override (`run --force-switch`).
+  - observability:
+    - `system2 show`,
+    - status includes switch summary and task sequence.
 
 ---
 

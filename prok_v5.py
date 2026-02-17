@@ -778,6 +778,8 @@ class ProkState:
     use_cca: bool = False
     cca_model_path: Optional[str] = None
     policy_constraints: Dict[str, Any] = None
+    risk_model: Dict[str, Any] = None
+    system2: Dict[str, Any] = None
 
 def _init_defaults(st: ProkState) -> None:
     if st.weekly_blackouts is None: st.weekly_blackouts = []
@@ -829,6 +831,55 @@ def _init_defaults(st: ProkState) -> None:
         st.policy_constraints["max_checks_per_hour"] = 10
     if "quiet_windows" not in st.policy_constraints or not isinstance(st.policy_constraints.get("quiet_windows"), list):
         st.policy_constraints["quiet_windows"] = []
+    if st.risk_model is None:
+        st.risk_model = {
+            "intercept": -1.0,
+            "w_neg_slack": 2.0,
+            "w_zero_slack": 1.2,
+            "w_low_slack": 0.8,
+            "w_drift_cluster": 0.8,
+            "w_recent_drift": 0.3,
+            "w_deadline_near": 0.7,
+            "w_days_urgency": 1.2,
+            "w_slack_buffer": 1.5,
+            "w_remaining_load": 0.8,
+            "cut_med": 0.34,
+            "cut_high": 0.67,
+        }
+    for k, v in {
+        "intercept": -1.0,
+        "w_neg_slack": 2.0,
+        "w_zero_slack": 1.2,
+        "w_low_slack": 0.8,
+        "w_drift_cluster": 0.8,
+        "w_recent_drift": 0.3,
+        "w_deadline_near": 0.7,
+        "w_days_urgency": 1.2,
+        "w_slack_buffer": 1.5,
+        "w_remaining_load": 0.8,
+        "cut_med": 0.34,
+        "cut_high": 0.67,
+    }.items():
+        if k not in st.risk_model:
+            st.risk_model[k] = v
+    if _to_float(st.risk_model.get("cut_med"), 0.34) >= _to_float(st.risk_model.get("cut_high"), 0.67):
+        st.risk_model["cut_med"] = 0.34
+        st.risk_model["cut_high"] = 0.67
+    if st.system2 is None:
+        st.system2 = {
+            "enabled": True,
+            "min_task_stick_min": 25,      # keep working on a task for at least this before switching
+            "max_switches_per_day": 4,     # anti-oscillation guard
+            "prefer_current_if_not_urgent": True,
+        }
+    for k, v in {
+        "enabled": True,
+        "min_task_stick_min": 25,
+        "max_switches_per_day": 4,
+        "prefer_current_if_not_urgent": True,
+    }.items():
+        if k not in st.system2:
+            st.system2[k] = v
 
     for t in st.tasks:
         if t.tmt_bins is None:
@@ -913,6 +964,8 @@ def load_state() -> ProkState:
         use_cca=bool(data.get("use_cca", False)),
         cca_model_path=data.get("cca_model_path"),
         policy_constraints=(data.get("policy_constraints") or None),
+        risk_model=(data.get("risk_model") or None),
+        system2=(data.get("system2") or None),
     )
     _init_defaults(st)
 
@@ -946,6 +999,7 @@ def load_state() -> ProkState:
         pass
 
     _init_defaults(st)
+    recompute_habit_from_logs(st)
     return st
 
 def save_state(st: ProkState) -> None:
@@ -1311,6 +1365,117 @@ def _load_log_records(path: Path) -> List[Dict[str, Any]]:
         except Exception:
             continue
     return out
+
+def recompute_habit_from_logs(st: ProkState) -> None:
+    recs = _load_log_records(LOG_FILE)
+    worked_days: set[dt.date] = set()
+    for r in recs:
+        ts = str(r.get("ts") or "")
+        if len(ts) < 10:
+            continue
+        try:
+            d = dt.date.fromisoformat(ts[:10])
+        except Exception:
+            continue
+        k = str(r.get("kind") or "")
+        if k == "log_minutes" and _to_int(r.get("minutes"), 0) > 0:
+            worked_days.add(d)
+        elif k == "session_end" and _to_int(r.get("minutes_worked_est"), 0) > 0:
+            worked_days.add(d)
+    td = _today()
+    st.today_min_done = td in worked_days
+    st.last_min_date = td.isoformat()
+    anchor = td if (td in worked_days) else (td - dt.timedelta(days=1))
+    streak = 0
+    cur = anchor
+    while cur in worked_days:
+        streak += 1
+        cur -= dt.timedelta(days=1)
+    if anchor < (td - dt.timedelta(days=1)):
+        streak = 0
+    st.streak = int(streak)
+    if worked_days:
+        st.last_streak_date = max(worked_days).isoformat()
+
+def check_skip_summary(records: List[Dict[str, Any]], days: int = 14) -> Dict[str, Any]:
+    cutoff = _today() - dt.timedelta(days=max(1, days))
+    reasons: Dict[str, int] = defaultdict(int)
+    total_checks = 0
+    skipped = 0
+    for r in records:
+        if str(r.get("kind")) != "check":
+            continue
+        ts = str(r.get("ts") or "")
+        d = None
+        if len(ts) >= 10:
+            try:
+                d = dt.date.fromisoformat(ts[:10])
+            except Exception:
+                d = None
+        if d is not None and d < cutoff:
+            continue
+        total_checks += 1
+        reason = r.get("skipped_reason")
+        if reason:
+            skipped += 1
+            reasons[str(reason)] += 1
+    return {"window_days": days, "checks_total": total_checks, "checks_skipped": skipped, "reasons": dict(reasons)}
+
+def system2_switch_summary(records: List[Dict[str, Any]], day: Optional[dt.date] = None) -> Dict[str, Any]:
+    d0 = day or _today()
+    starts = [r for r in records if str(r.get("kind")) == "session_start"]
+    starts = [r for r in starts if str(r.get("ts") or "")[:10] == d0.isoformat()]
+    starts.sort(key=lambda r: str(r.get("ts") or ""))
+    seq = [str(r.get("task_id") or "") for r in starts if r.get("task_id")]
+    switches = 0
+    for i in range(1, len(seq)):
+        if seq[i] != seq[i-1]:
+            switches += 1
+    return {"day": d0.isoformat(), "sessions": len(seq), "switches": switches, "sequence": seq}
+
+def recent_minutes_on_task(records: List[Dict[str, Any]], task_id: str, day: Optional[dt.date] = None) -> int:
+    d0 = day or _today()
+    m = 0
+    for r in records:
+        if str(r.get("ts") or "")[:10] != d0.isoformat():
+            continue
+        if str(r.get("task_id") or "") != str(task_id):
+            continue
+        k = str(r.get("kind") or "")
+        if k == "log_minutes":
+            m += _to_int(r.get("minutes"), 0)
+        elif k == "session_end":
+            m += _to_int(r.get("minutes_worked_est"), 0)
+    return max(0, m)
+
+def system2_switch_decision(
+    st: ProkState,
+    records: List[Dict[str, Any]],
+    current_task_id: Optional[str],
+    requested_task_id: Optional[str],
+) -> Tuple[bool, str]:
+    s2 = st.system2 or {}
+    if not bool(s2.get("enabled", True)):
+        return True, "system2_disabled"
+    if not current_task_id or not requested_task_id or current_task_id == requested_task_id:
+        return True, "no_switch"
+    summ = system2_switch_summary(records, _today())
+    max_sw = max(0, _to_int(s2.get("max_switches_per_day"), 4))
+    if summ["switches"] >= max_sw:
+        return False, "max_switches_per_day"
+    min_stick = max(0, _to_int(s2.get("min_task_stick_min"), 25))
+    cur_min = recent_minutes_on_task(records, current_task_id, _today())
+    if cur_min < min_stick:
+        return False, f"min_task_stick_min({cur_min}<{min_stick})"
+    if bool(s2.get("prefer_current_if_not_urgent", True)):
+        tcur = get_task_by_id(st, current_task_id)
+        treq = get_task_by_id(st, requested_task_id)
+        if tcur and treq and tcur.deadline and treq.deadline:
+            need_cur = task_min_blocks_today_needed(st, tcur)
+            need_req = task_min_blocks_today_needed(st, treq)
+            if need_cur >= need_req:
+                return False, "prefer_current_if_not_urgent"
+    return True, "allowed"
 
 def _legacy_signature_from_event(ev: Dict[str, Any]) -> str:
     domain = str(ev.get("domain") or "unknown").lower()
@@ -1695,6 +1860,16 @@ def task_capacity_blocks(st: ProkState, task: Task) -> int:
 
 def task_slack_blocks(st: ProkState, task: Task) -> int:
     return task_capacity_blocks(st, task) - task_remaining_blocks_needed(st, task)
+
+def task_min_blocks_today_needed(st: ProkState, task: Task) -> int:
+    if not task.deadline:
+        return 0
+    days = horizon_days_for_deadline(st, task.deadline)
+    if not days:
+        return 0
+    need = task_remaining_blocks_needed(st, task)
+    future_cap = sum(day_capacity_blocks(st, d) for d in days[1:])
+    return max(0, int(need - future_cap))
 
 def slack_band_from_blocks(s: int) -> str:
     return "neg" if s < 0 else ("zero" if s == 0 else "pos")
@@ -2404,6 +2579,8 @@ def run_session(
 
     session_id = f"{_now_iso()}_{random.randint(1000,9999)}"
     check_count = 0
+    checks_skipped = 0
+    check_skip_reasons: Dict[str, int] = defaultdict(int)
     check_timestamps: List[float] = []
 
     def can_fire_check() -> Tuple[bool, str]:
@@ -2469,14 +2646,17 @@ def run_session(
                 "domain": task.domain,
             })
 
-    def ask_state_check() -> str:
+    def ask_state_check() -> Tuple[str, Optional[str]]:
+        nonlocal checks_skipped
         ok, why = can_fire_check()
         if not ok:
             print(f"\nCHECK skipped by policy constraint ({why}).")
-            return ""
+            checks_skipped += 1
+            check_skip_reasons[str(why)] += 1
+            return "", str(why)
         check_timestamps.append(time.time())
         print(f"\n{lang_get(lang, 'prompt.check', 'CHECK')}: [e=engaged, d=drifting, p=procrastinating, b=blocked]")
-        return input("> ").strip().lower()[:1]
+        return input("> ").strip().lower()[:1], None
 
     def study_ratings(event_kind: str) -> Dict[str, Any]:
         if not st.study_mode:
@@ -2650,16 +2830,18 @@ def run_session(
                 })
                 break
             elif c0 == "c":
-                resp = ask_state_check()
+                resp, skipped_reason = ask_state_check()
                 _log_event("check", {
                     "participant_id": st.participant_id,
                     "session_id": session_id,
                     "task_id": task.id,
                     "task_name": task.name,
                     "domain": task.domain,
-                    "resp": resp or "?",
+                    "resp": ("skipped" if skipped_reason else (resp or "?")),
+                    "skipped_reason": skipped_reason,
                 })
-                check_count += 1
+                if skipped_reason is None:
+                    check_count += 1
                 if resp in ("d","p"):
                     course_correct(resp, from_check=True)
                 elif resp == "b":
@@ -2678,16 +2860,18 @@ def run_session(
             if random_checks and next_check is not None:
                 next_check -= dt_sec
                 if next_check <= 0:
-                    resp = ask_state_check()
+                    resp, skipped_reason = ask_state_check()
                     _log_event("check", {
                         "participant_id": st.participant_id,
                         "session_id": session_id,
                         "task_id": task.id,
                         "task_name": task.name,
                         "domain": task.domain,
-                        "resp": resp or "?",
+                        "resp": ("skipped" if skipped_reason else (resp or "?")),
+                        "skipped_reason": skipped_reason,
                     })
-                    check_count += 1
+                    if skipped_reason is None:
+                        check_count += 1
                     if resp in ("d","p"):
                         course_correct(resp, from_check=True)
                     elif resp == "b":
@@ -2710,6 +2894,8 @@ def run_session(
         "minutes_worked_est": minutes_worked,
         "theta_end": asdict(task.tmt_bins),
         "check_count": check_count,
+        "checks_skipped": checks_skipped,
+        "check_skip_reasons": dict(check_skip_reasons),
     }
 
     if st.study_mode:
@@ -2918,33 +3104,268 @@ def in_quiet_window(st: ProkState, now: Optional[dt.datetime] = None) -> bool:
 def deadline_risk(st: ProkState, task: Task) -> Tuple[float, str, List[str]]:
     if not task.deadline:
         return 0.0, "none", []
+    rm = st.risk_model or {}
+    w_neg = _to_float(rm.get("w_neg_slack"), 2.0)
+    w_zero = _to_float(rm.get("w_zero_slack"), 1.2)
+    w_low = _to_float(rm.get("w_low_slack"), 0.8)
+    w_dc = _to_float(rm.get("w_drift_cluster"), 0.8)
+    w_rd = _to_float(rm.get("w_recent_drift"), 0.3)
+    w_dn = _to_float(rm.get("w_deadline_near"), 0.7)
+    w_du = _to_float(rm.get("w_days_urgency"), 1.2)
+    w_sb = _to_float(rm.get("w_slack_buffer"), 1.5)
+    w_rl = _to_float(rm.get("w_remaining_load"), 0.8)
+    intercept = _to_float(rm.get("intercept"), -1.0)
+    cut_med = _to_float(rm.get("cut_med"), 0.34)
+    cut_high = _to_float(rm.get("cut_high"), 0.67)
+    if cut_med >= cut_high:
+        cut_med, cut_high = 0.34, 0.67
     slack = task_slack_blocks(st, task)
     reasons: List[str] = []
-    score = 0.0
+    score = float(intercept)
     if slack < 0:
-        score += 2.0; reasons.append("negative_slack")
+        score += w_neg; reasons.append("negative_slack")
     elif slack == 0:
-        score += 1.2; reasons.append("zero_slack")
+        score += w_zero; reasons.append("zero_slack")
     elif slack <= 2:
-        score += 0.8; reasons.append("low_slack")
+        score += w_low; reasons.append("low_slack")
     if task.recent_drift_count >= 3:
-        score += 0.8; reasons.append("drift_cluster")
+        score += w_dc; reasons.append("drift_cluster")
     elif task.recent_drift_count >= 1:
-        score += 0.3; reasons.append("recent_drift")
+        score += w_rd; reasons.append("recent_drift")
     try:
         days_left = max(0, (dt.date.fromisoformat(task.deadline) - _today()).days)
     except Exception:
         days_left = 0
     if days_left <= 3 and task.remaining_minutes > 0:
-        score += 0.7; reasons.append("deadline_near")
-    p = 1.0 / (1.0 + math.exp(-(score - 1.0)))
-    if p >= 0.67:
+        score += w_dn; reasons.append("deadline_near")
+
+    # Continuous terms for non-flat risk in safe regimes.
+    days_urgency = 1.0 / float(days_left + 1)
+    score += w_du * days_urgency
+    reasons.append("days_urgency")
+
+    slack_pos = max(0, float(slack))
+    slack_buffer = 1.0 / float(slack_pos + 1.0)
+    score += w_sb * slack_buffer
+    reasons.append("slack_buffer")
+
+    load_ratio = float(task.remaining_minutes) / float(max(1, task.total_minutes if task.total_minutes > 0 else task.remaining_minutes))
+    score += w_rl * max(0.0, min(1.0, load_ratio))
+    reasons.append("remaining_load")
+    p = 1.0 / (1.0 + math.exp(-score))
+    if p >= cut_high:
         band = "high"
-    elif p >= 0.34:
+    elif p >= cut_med:
         band = "med"
     else:
         band = "low"
     return p, band, reasons
+
+def allocate_minutes_budget(st: ProkState, budget_minutes: int) -> Dict[str, int]:
+    tasks = [t for t in st.tasks if t.deadline and t.remaining_minutes > 0]
+    if budget_minutes <= 0 or not tasks:
+        return {}
+    # Allocate in chunks and pick the task with highest modeled marginal benefit:
+    # (risk drop) + small urgency/slack tie-break.
+    chunk = max(5, _to_int(st.plan_block_min, 50))
+    rem = {t.id: int(t.remaining_minutes) for t in tasks}
+    alloc = {t.id: 0 for t in tasks}
+    by_id = {t.id: t for t in tasks}
+    left = int(budget_minutes)
+
+    def urgency_tie(t: Task) -> float:
+        try:
+            days = max(0, (dt.date.fromisoformat(t.deadline) - _today()).days)
+        except Exception:
+            days = 9999
+        slack = task_slack_blocks(st, t)
+        return (1.0 / float(days + 1)) + (0.05 if slack <= 1 else 0.0)
+
+    while left > 0:
+        candidates = [tid for tid, r in rem.items() if r > 0]
+        if not candidates:
+            break
+        best_tid = None
+        best_score = -1e9
+        for tid in candidates:
+            t = by_id[tid]
+            cur_p, _, _ = deadline_risk(st, Task(
+                id=t.id, domain=t.domain, name=t.name, deadline=t.deadline,
+                total_minutes=t.total_minutes, remaining_minutes=rem[tid],
+                tmt_bins=t.tmt_bins, recent_drift_count=t.recent_drift_count,
+            ))
+            take = min(chunk, left, rem[tid])
+            nxt_p, _, _ = deadline_risk(st, Task(
+                id=t.id, domain=t.domain, name=t.name, deadline=t.deadline,
+                total_minutes=t.total_minutes, remaining_minutes=max(0, rem[tid] - take),
+                tmt_bins=t.tmt_bins, recent_drift_count=t.recent_drift_count,
+            ))
+            marginal = (float(cur_p) - float(nxt_p)) / float(max(1, take))
+            # Diminishing returns: avoid collapsing all budget into one task when
+            # modeled marginal gains are near-equal.
+            score = marginal + 0.01 * urgency_tie(t) - 0.0005 * float(alloc.get(tid, 0))
+            if score > best_score:
+                best_score = score
+                best_tid = tid
+        if best_tid is None:
+            break
+        take = min(chunk, left, rem[best_tid])
+        rem[best_tid] -= take
+        alloc[best_tid] += take
+        left -= take
+    return {k: int(v) for k, v in alloc.items() if v > 0}
+
+def ranked_counterfactual_choices(st: ProkState, minutes: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    mm = max(0, _to_int(minutes, 0))
+    if mm <= 0:
+        return out
+    for t in st.tasks:
+        if not t.deadline or t.remaining_minutes <= 0:
+            continue
+        cur_slack = task_slack_blocks(st, t)
+        p0, b0, _ = deadline_risk(st, t)
+        rem2 = max(0, t.remaining_minutes - mm)
+        t2 = Task(
+            id=t.id, domain=t.domain, name=t.name, deadline=t.deadline,
+            total_minutes=t.total_minutes, remaining_minutes=rem2,
+            tmt_bins=t.tmt_bins, recent_drift_count=t.recent_drift_count,
+        )
+        slack2 = task_slack_blocks(st, t2)
+        p1, b1, _ = deadline_risk(st, t2)
+        delta_risk = float(p0) - float(p1)
+        delta_slack = int(slack2 - cur_slack)
+        try:
+            days = max(0, (dt.date.fromisoformat(t.deadline) - _today()).days)
+        except Exception:
+            days = 9999
+        urgency = 1.0 / float(days + 1)
+        # Utility: prioritize risk reduction, then slack gain, then urgency.
+        score = 5.0 * delta_risk + 0.05 * float(delta_slack) + 0.01 * urgency
+        out.append({
+            "task_id": t.id,
+            "task_name": t.name,
+            "minutes": mm,
+            "score": score,
+            "risk_before": p0,
+            "risk_after": p1,
+            "risk_band_before": b0,
+            "risk_band_after": b1,
+            "slack_before": cur_slack,
+            "slack_after": slack2,
+            "delta_risk": delta_risk,
+            "delta_slack": delta_slack,
+            "days_left": days,
+        })
+    out.sort(key=lambda r: r["score"], reverse=True)
+    return out
+
+def s3_primary_task(st: ProkState) -> Optional[str]:
+    plan = replan_multitask(st)
+    tk = _today().isoformat()
+    day = plan.get(tk, {}) if isinstance(plan, dict) else {}
+    if not isinstance(day, dict) or not day:
+        return st.active_task_id
+    return max(day.items(), key=lambda kv: int(kv[1]))[0]
+
+def s4_primary_task(st: ProkState) -> Optional[str]:
+    cands = [t for t in st.tasks if t.deadline and t.remaining_minutes > 0]
+    if not cands:
+        return st.active_task_id
+    ranked = sorted(
+        cands,
+        key=lambda t: (-task_min_blocks_today_needed(st, t), -deadline_risk(st, t)[0], task_slack_blocks(st, t)),
+    )
+    return ranked[0].id if ranked else st.active_task_id
+
+def arbitrate_s3_s4(st: ProkState) -> Tuple[Optional[str], str]:
+    a = s3_primary_task(st)
+    b = s4_primary_task(st)
+    if a == b:
+        return a, "agree"
+    ta = get_task_by_id(st, a) if a else None
+    tb = get_task_by_id(st, b) if b else None
+    ma = task_min_blocks_today_needed(st, ta) if ta else 0
+    mb = task_min_blocks_today_needed(st, tb) if tb else 0
+    if mb > ma:
+        return b, "s4_overrides_must_today"
+    ra = deadline_risk(st, ta)[0] if ta else 0.0
+    rb = deadline_risk(st, tb)[0] if tb else 0.0
+    if rb > ra + 0.02:
+        return b, "s4_overrides_risk"
+    return a, "s3_default"
+
+def system2_rhythm_schedule(st: ProkState, blocks: int) -> List[str]:
+    n = max(0, _to_int(blocks, 0))
+    if n <= 0:
+        return []
+    tasks = [t for t in st.tasks if t.deadline and t.remaining_minutes > 0]
+    if not tasks:
+        return []
+    s2 = st.system2 or {}
+    max_switches = max(0, _to_int(s2.get("max_switches_per_day"), 4))
+    # Start from S3/S4 arbitration.
+    first, _ = arbitrate_s3_s4(st)
+    ranked = sorted(tasks, key=lambda t: (-task_min_blocks_today_needed(st, t), -deadline_risk(st, t)[0], task_slack_blocks(st, t)))
+    ids = [t.id for t in ranked]
+    if first and first in ids:
+        ids.remove(first)
+        ids.insert(0, first)
+    if not ids:
+        return []
+    seq = [ids[0]]
+    switches = 0
+    i = 1
+    while len(seq) < n:
+        if switches >= max_switches or i >= len(ids):
+            seq.append(seq[-1])
+            continue
+        seq.append(ids[i])
+        switches += 1
+        i += 1
+    return seq[:n]
+
+def forecast_risk_map(st: ProkState, horizon_days: int = 14) -> List[Dict[str, Any]]:
+    h = max(1, _to_int(horizon_days, 14))
+    out = []
+    for t in st.tasks:
+        if not t.deadline or t.remaining_minutes <= 0:
+            continue
+        p0, b0, r0 = deadline_risk(st, t)
+        need = task_remaining_blocks_needed(st, t)
+        cap = task_capacity_blocks(st, t)
+        miss = max(0, need - cap)
+        dl = dt.date.fromisoformat(t.deadline)
+        days_left = max(0, (dl - _today()).days)
+        within = days_left <= h
+        out.append({
+            "task_id": t.id,
+            "task_name": t.name,
+            "deadline": t.deadline,
+            "days_left": days_left,
+            "within_horizon": within,
+            "risk_p": p0,
+            "risk_band": b0,
+            "risk_reasons": r0,
+            "slack_blocks": task_slack_blocks(st, t),
+            "miss_blocks_if_no_change": miss,
+        })
+    out.sort(key=lambda r: (not r["within_horizon"], -r["risk_p"], r["slack_blocks"], r["days_left"]))
+    return out
+
+def constitutional_checks(st: ProkState, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    checks = []
+    level, _ = compute_alarm(st)
+    checks.append({"id": "feasibility_guard", "pass": level != "critical", "detail": f"alarm={level}"})
+    max_cph = _to_int((st.policy_constraints or {}).get("max_checks_per_hour"), 10)
+    checks.append({"id": "noncoercive_check_cap", "pass": max_cph <= 12, "detail": f"max_checks_per_hour={max_cph}"})
+    skip = check_skip_summary(records, days=14)
+    checks.append({"id": "policy_observability", "pass": True, "detail": f"checks={skip['checks_total']} skipped={skip['checks_skipped']}"})
+    s2 = st.system2 or {}
+    checks.append({"id": "system2_enabled", "pass": bool(s2.get("enabled", True)), "detail": f"system2={bool(s2.get('enabled', True))}"})
+    ph = st.phenomenology or {}
+    checks.append({"id": "phenom_bounded", "pass": bool(ph.get("enabled", True)), "detail": f"mode={ph.get('mode')} topK=3"})
+    return checks
 
 def _ics_unfold_lines(text: str) -> List[str]:
     out: List[str] = []
@@ -3225,7 +3646,7 @@ def cmd_today(args) -> None:
     level, reasons = compute_alarm(st)
 
     print(f"DATE: {td.isoformat()}")
-    print(f"Capacity today: {cap} block(s) | Planned today: {total_planned} block(s)")
+    print(f"Capacity today: {cap} block(s) | Planned today (advisory): {total_planned} block(s)")
     print(f"Minimum today: {st.tiny_min} min | done: {'YES' if st.today_min_done else 'NO'} | streak: {st.streak}")
     print(f"Alarm: {level.upper()}")
     if reasons:
@@ -3247,27 +3668,102 @@ def cmd_today(args) -> None:
                 risk_txt = f"{rb}({_fmt_num(rp)})"
             print(f"  {tid} | {name} | {blocks}")
             print(f"    risk: {risk_txt}")
+    # Necessity ranking: minimum blocks required today to preserve on-time feasibility.
+    necessity_rows: List[Dict[str, Any]] = []
+    for t in st.tasks:
+        if not t.deadline or t.remaining_minutes <= 0:
+            continue
+        need_today = task_min_blocks_today_needed(st, t)
+        total_need = task_remaining_blocks_needed(st, t)
+        days = horizon_days_for_deadline(st, t.deadline)
+        days_left = max(1, len(days))
+        avg_daily = int(math.ceil(float(total_need) / float(days_left)))
+        rp, rb, _ = deadline_risk(st, t)
+        try:
+            dl = dt.date.fromisoformat(t.deadline)
+            dleft = max(0, (dl - _today()).days)
+        except Exception:
+            dleft = 9999
+        necessity_rows.append({
+            "task": t,
+            "need_today": int(need_today),
+            "avg_daily": int(avg_daily),
+            "risk_p": float(rp),
+            "risk_band": rb,
+            "days_left": dleft,
+            "slack": task_slack_blocks(st, t),
+        })
 
-    # Suggested run
-    suggested = None
-    if st.active_task_id and st.active_task_id in today_plan:
-        suggested = get_task_by_id(st, st.active_task_id)
-    elif today_plan:
-        top_id = max(today_plan.items(), key=lambda kv: kv[1])[0]
-        suggested = get_task_by_id(st, top_id)
-    if suggested:
-        sugg_minutes = domain_block_minutes(st, suggested.domain, suggested.tmt_bins)
-        gmn, gmx = domain_check_gaps(st, suggested.domain, suggested.tmt_bins)
-        print(f"Suggested run: --task {suggested.id} --minutes {sugg_minutes} --checks auto (gaps {gmn}–{gmx})")
+    necessity_rows.sort(key=lambda r: (-r["need_today"], -r["risk_p"], r["days_left"], r["slack"]))
+    must_blocks = sum(r["need_today"] for r in necessity_rows)
+    must_minutes = must_blocks * st.plan_block_min
+    print(
+        f"Minimum required today to stay on-time feasible: {must_blocks} block(s) ({must_minutes} min) "
+        f"| today capacity={cap} block(s)"
+    )
+    if must_blocks == 0:
+        print("Why must_today=0: future capacity from tomorrow to each deadline already covers remaining required blocks.")
+    if must_blocks > cap:
+        print("WARNING: even minimum required work exceeds today capacity.")
+
+    if necessity_rows:
+        print("Necessity ranking (finish-on-time boundary):")
+        for i, r in enumerate(necessity_rows, 1):
+            t = r["task"]
+            print(
+                f"  {i}. {t.id} | {t.name} | must_today={r['need_today']} block(s) | "
+                f"pace={r['avg_daily']} block(s)/day | risk={r['risk_band']}({_fmt_num(r['risk_p'])}) | "
+                f"deadline={t.deadline}"
+            )
+
+        print("Run commands (ranked by necessity):")
+        for i, r in enumerate(necessity_rows, 1):
+            t = r["task"]
+            if r["need_today"] > 0:
+                mins = r["need_today"] * st.plan_block_min
+            else:
+                mins = min(max(1, st.tiny_min), max(1, t.remaining_minutes))
+            gmn, gmx = domain_check_gaps(st, t.domain, t.tmt_bins)
+            print(
+                f"  {i}. python prok_v5.py run --task {t.id} --minutes {mins} --checks auto "
+                f"# gaps {gmn}-{gmx}"
+            )
+
+        top = necessity_rows[0]
+        top_task = top["task"]
+        top_mins = (
+            (top["need_today"] * st.plan_block_min)
+            if top["need_today"] > 0
+            else min(max(1, st.tiny_min), max(1, top_task.remaining_minutes))
+        )
+        tgmn, tgmx = domain_check_gaps(st, top_task.domain, top_task.tmt_bins)
+        print(
+            f"Suggested run command: 1. python prok_v5.py run --task {top_task.id} --minutes {top_mins} "
+            f"--checks auto  # gaps {tgmn}-{tgmx}"
+        )
 
 def cmd_run(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
+    recs = _load_log_records(LOG_FILE)
     if args.fitness:
         st.fitness_path = args.fitness
     if args.homeostat:
         st.homeostat_path = args.homeostat
     nk_select_genome(st)
-    task = select_active_task(st, args.task, args.domain, args.name)
+    effective_task = args.task
+    if effective_task and st.active_task_id and effective_task != st.active_task_id and not bool(args.force_switch):
+        ok, why = system2_switch_decision(st, recs, st.active_task_id, effective_task)
+        if not ok:
+            _log_event("system2_switch_suppressed", {
+                "participant_id": st.participant_id,
+                "from_task": st.active_task_id,
+                "requested_task": effective_task,
+                "reason": why,
+            })
+            print(f"System 2 damping: switch suppressed ({why}). Keeping current task {st.active_task_id}.")
+            print("Use --force-switch to override.")
+            effective_task = st.active_task_id
+    task = select_active_task(st, effective_task, args.domain, args.name)
     save_state(st)
 
     minutes = args.minutes or domain_block_minutes(st, task.domain, task.tmt_bins)
@@ -3359,6 +3855,7 @@ def cmd_log(args) -> None:
 
 def cmd_status(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
+    recs = _load_log_records(LOG_FILE)
     print("STATE:")
     print(f"  participant_id: {st.participant_id or '(unset)'} | study_mode: {st.study_mode}")
     print(f"  plan_block_min: {st.plan_block_min} | tiny_min: {st.tiny_min}")
@@ -3387,6 +3884,15 @@ def cmd_status(args) -> None:
     print(f"  fitness_path: {st.fitness_path or '(none)'}")
     print(f"  homeostat_path: {st.homeostat_path or '(none)'}")
     print(f"  goal_profile: {st.goal_profile}")
+    print(f"  policy_constraints: {st.policy_constraints}")
+    skip = check_skip_summary(recs, days=14)
+    print(
+        f"  check_policy_observability(14d): total={skip['checks_total']} "
+        f"skipped={skip['checks_skipped']} reasons={skip['reasons']}"
+    )
+    s2sum = system2_switch_summary(recs, _today())
+    print(f"  system2: {st.system2}")
+    print(f"  system2_switches_today: {s2sum['switches']} | sessions={s2sum['sessions']} | sequence={s2sum['sequence']}")
     ph = st.phenomenology or {}
     print(f"  phenomenology: enabled={bool(ph.get('enabled', True))} | signatures={len((ph.get('signatures') or {}))} | min_samples={_to_int(ph.get('min_samples'), 3)} | influence={_to_float(ph.get('influence'), 0.35):.2f}")
     print(f"  use_cca: {st.use_cca} (v4 placeholder, not used)")
@@ -3433,6 +3939,53 @@ def cmd_config(args) -> None:
         save_state(st)
         print("Config updated.")
 
+def cmd_risk(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    if args.action == "show":
+        print(_json_dump(st.risk_model or {}))
+        return
+    if args.action == "set":
+        rm = dict(st.risk_model or {})
+        for k in (
+            "intercept", "w_neg_slack", "w_zero_slack", "w_low_slack",
+            "w_drift_cluster", "w_recent_drift", "w_deadline_near",
+            "w_days_urgency", "w_slack_buffer", "w_remaining_load",
+            "cut_med", "cut_high",
+        ):
+            v = getattr(args, k, None)
+            if v is not None:
+                rm[k] = float(v)
+        if _to_float(rm.get("cut_med"), 0.34) >= _to_float(rm.get("cut_high"), 0.67):
+            raise SystemExit("risk cut_med must be < cut_high")
+        st.risk_model = rm
+        save_state(st)
+        print("Risk model updated.")
+        return
+    if args.action == "calibrate":
+        recs = _load_log_records(LOG_FILE)
+        # Heuristic calibration from recent pressure signals.
+        pressure = 0
+        total = 0
+        for r in recs[-500:]:
+            k = str(r.get("kind") or "")
+            if k == "course_correct":
+                total += 1
+                if str(r.get("label") or "").upper() in ("PROCRASTINATION", "DRIFT"):
+                    pressure += 1
+        rate = (float(pressure) / float(total)) if total > 0 else 0.25
+        target = max(0.15, min(0.65, 0.25 + 0.5 * rate))
+        intercept = math.log(target / max(1e-9, 1.0 - target))
+        rm = dict(st.risk_model or {})
+        rm["intercept"] = round(intercept, 4)
+        if args.apply:
+            st.risk_model = rm
+            save_state(st)
+            print("Risk model calibrated and applied.")
+        else:
+            print("Risk calibration proposal (dry-run):")
+        print(_json_dump({"pressure_rate": rate, "proposed": rm}))
+        return
+
 def cmd_policy(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
     if args.action == "show":
@@ -3455,34 +4008,299 @@ def cmd_policy(args) -> None:
         print("Policy constraints updated.")
         return
 
+def cmd_system2(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    recs = _load_log_records(LOG_FILE)
+    if args.action == "show":
+        summ = system2_switch_summary(recs, _today())
+        print(_json_dump({
+            "system2": st.system2,
+            "today_switch_summary": summ,
+        }))
+        return
+    if args.action == "set":
+        s2 = dict(st.system2 or {})
+        if args.enabled is not None:
+            s2["enabled"] = (str(args.enabled).lower() == "on")
+        if args.min_task_stick_min is not None:
+            s2["min_task_stick_min"] = max(0, _to_int(args.min_task_stick_min, _to_int(s2.get("min_task_stick_min"), 25)))
+        if args.max_switches_per_day is not None:
+            s2["max_switches_per_day"] = max(0, _to_int(args.max_switches_per_day, _to_int(s2.get("max_switches_per_day"), 4)))
+        if args.prefer_current_if_not_urgent is not None:
+            s2["prefer_current_if_not_urgent"] = (str(args.prefer_current_if_not_urgent).lower() == "on")
+        st.system2 = s2
+        save_state(st)
+        print("System 2 settings updated.")
+        return
+    if args.action == "calibrate":
+        recs = _load_log_records(LOG_FILE)
+        by_day: Dict[str, List[str]] = defaultdict(list)
+        for r in recs:
+            if str(r.get("kind")) != "session_start":
+                continue
+            ds = str(r.get("ts") or "")[:10]
+            tid = str(r.get("task_id") or "")
+            if ds and tid:
+                by_day[ds].append(tid)
+        switch_counts = []
+        for _, seq in by_day.items():
+            sw = 0
+            for i in range(1, len(seq)):
+                if seq[i] != seq[i-1]:
+                    sw += 1
+            switch_counts.append(sw)
+        med_sw = int(statistics.median(switch_counts)) if switch_counts else 2
+        proposal = dict(st.system2 or {})
+        proposal["max_switches_per_day"] = max(1, min(8, med_sw + 1))
+        proposal["min_task_stick_min"] = max(10, _to_int(proposal.get("min_task_stick_min"), 25))
+        if args.apply:
+            st.system2 = proposal
+            save_state(st)
+            print("System 2 calibrated and applied.")
+        else:
+            print("System 2 calibration proposal (dry-run):")
+        print(_json_dump({"days": len(by_day), "median_switches": med_sw, "proposed": proposal}))
+        return
+
+def cmd_controlroom(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    cap = day_capacity_blocks(st, _today())
+    plan = replan_multitask(st)
+    tk = _today().isoformat()
+    day_plan = plan.get(tk, {}) if isinstance(plan, dict) else {}
+    must = []
+    for t in st.tasks:
+        if t.deadline and t.remaining_minutes > 0:
+            must.append({"task_id": t.id, "must_today": task_min_blocks_today_needed(st, t), "risk": deadline_risk(st, t)[0]})
+    must.sort(key=lambda r: (-r["must_today"], -r["risk"]))
+    arb, why = arbitrate_s3_s4(st)
+    print(_json_dump({
+        "date": _iso_today(),
+        "capacity_blocks": cap,
+        "advisory_today_plan": day_plan,
+        "must_boundary_blocks": sum(x["must_today"] for x in must),
+        "necessity": must,
+        "arbitrated_primary_task": arb,
+        "arbitration_reason": why,
+    }))
+
+def cmd_forecast(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    h = max(1, _to_int(args.days, 14))
+    rows = forecast_risk_map(st, h)
+    print(f"FORWARD SCAN ({h} days)")
+    for r in rows[: max(1, _to_int(args.top, 10))]:
+        print(
+            f"{r['task_id']} | {r['task_name']} | dleft={r['days_left']} | within={r['within_horizon']} | "
+            f"risk={r['risk_band']}({_fmt_num(r['risk_p'])}) | slack={r['slack_blocks']} | miss={r['miss_blocks_if_no_change']}"
+        )
+
+def cmd_constitution(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    recs = _load_log_records(LOG_FILE)
+    rows = constitutional_checks(st, recs)
+    print("CONSTITUTION CHECK")
+    for r in rows:
+        print(f"{'PASS' if r['pass'] else 'FAIL'} | {r['id']} | {r['detail']}")
+
+def cmd_close(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    recs = _load_log_records(LOG_FILE)
+    td = _today().isoformat()
+    logs = [r for r in recs if str(r.get("ts") or "")[:10] == td]
+    worked = 0
+    for r in logs:
+        k = str(r.get("kind") or "")
+        if k == "log_minutes":
+            worked += _to_int(r.get("minutes"), 0)
+        elif k == "session_end":
+            worked += _to_int(r.get("minutes_worked_est"), 0)
+    cap = day_capacity_blocks(st, _today()) * st.plan_block_min
+    plan = replan_multitask(st)
+    must = sum(task_min_blocks_today_needed(st, t) for t in st.tasks if t.deadline and t.remaining_minutes > 0) * st.plan_block_min
+    arb, why = arbitrate_s3_s4(st)
+    print("DAILY CLOSE LOOP")
+    print(f"date={td} worked_min={worked} capacity_min={cap} required_boundary_min={must}")
+    print(f"s3s4_primary={arb} reason={why}")
+    print(f"replan_status={plan.get('_status')} need_total_blocks={plan.get('_need_total')}")
+
+def cmd_explain(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    recs = _load_log_records(LOG_FILE)
+    if args.action == "today":
+        td = _today()
+        cap = day_capacity_blocks(st, td)
+        plan = replan_multitask(st)
+        today_key = td.isoformat()
+        today_plan = plan.get(today_key, {}) if plan.get("_status") in (1, 2) else {}
+        must_rows = []
+        for t in st.tasks:
+            if not t.deadline or t.remaining_minutes <= 0:
+                continue
+            rp, rb, rr = deadline_risk(st, t)
+            must_rows.append({
+                "task_id": t.id,
+                "task_name": t.name,
+                "must_today_blocks": task_min_blocks_today_needed(st, t),
+                "slack_blocks": task_slack_blocks(st, t),
+                "risk_p": rp,
+                "risk_band": rb,
+                "risk_reasons": rr,
+            })
+        must_rows.sort(key=lambda r: (-r["must_today_blocks"], -r["risk_p"], r["slack_blocks"]))
+        s2sum = system2_switch_summary(recs, td)
+        level, reasons = compute_alarm(st)
+
+        print("EXPLAIN TODAY")
+        print("S1 (operations): per-task boundary state")
+        for r in must_rows:
+            print(
+                f"  {r['task_id']} | must_today={r['must_today_blocks']} | "
+                f"slack={r['slack_blocks']} | risk={r['risk_band']}({_fmt_num(r['risk_p'])}) | "
+                f"risk_reasons={r['risk_reasons']}"
+            )
+        print("S2 (coordination/damping):")
+        print(f"  settings={st.system2}")
+        print(f"  switches_today={s2sum['switches']} sessions={s2sum['sessions']} sequence={s2sum['sequence']}")
+        print("S3 (today control):")
+        print(f"  capacity_blocks={cap} advisory_plan={today_plan} required_boundary_blocks={sum(r['must_today_blocks'] for r in must_rows)}")
+        print("S4 (horizon intelligence):")
+        print(f"  replan_status={plan.get('_status')} total_need={plan.get('_need_total')} task_slack={plan.get('_task_slack')}")
+        print("S5 (policy/ethics/homeostat):")
+        print(f"  alarm={level} alarm_reasons={reasons[:5]}")
+        print(f"  homeostat_path={st.homeostat_path or '(builtin)'} policy_constraints={st.policy_constraints}")
+        return
+
+    if args.action == "decision":
+        task = select_active_task(st, args.task, args.domain, args.name)
+        label = str(args.label or ("PROCRASTINATION" if args.kind == "p" else "DRIFT")).upper()
+        trigger = str(args.trigger or "other")
+        mn = _to_int(args.min_gap, 6)
+        mx = _to_int(args.max_gap, 14)
+        if mx < mn:
+            mx = mn
+        fit = load_fitness_program(st) if st.fitness_path else None
+        homeo = load_homeostat_program(st) if st.homeostat_path else None
+        sel = select_recovery_with_trace(
+            st=st,
+            task=task,
+            label=label,
+            trigger=trigger,
+            check_gaps=(mn, mx),
+            fitness_program=fit,
+            homeostat_program=homeo,
+        )
+        s2sum = system2_switch_summary(recs, _today())
+        print("EXPLAIN DECISION")
+        print(f"Input: task={task.id} label={label} trigger={trigger} gaps={mn}-{mx}")
+        print("S1:")
+        print(f"  task_theta={asdict(task.tmt_bins)} task_slack={task_slack_blocks(st, task)}")
+        print("S2:")
+        print(f"  switch_context={s2sum}")
+        print("S3/S5 baseline ranking (homeostat+fitness):")
+        for i, row in enumerate(sel.get("trace_rows") or [], 1):
+            print(
+                f"  {i}. {row.get('name')} | h_score={row.get('homeostat_score')} "
+                f"(pen={row.get('homeostat_penalty')},bonus={row.get('homeostat_bonus')}) "
+                f"| fitness_rank={row.get('fitness_rank')}"
+            )
+        print("S4/S5 refinement:")
+        print(
+            f"  selection_source={sel.get('selection_source')} chosen={sel.get('best', {}).get('name')} "
+            f"phenom_mode={sel.get('phenom_mode')} phenom_score={sel.get('phenom_score')}"
+        )
+        pcs = sel.get("phenom_components") or {}
+        if pcs:
+            print(f"  phenom_components={pcs}")
+        return
+
 def cmd_simulate(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
-    mm = max(0, _to_int(args.minutes_today, 0))
     target = args.task
     if target and not get_task_by_id(st, target):
         raise SystemExit(f"Task not found: {target}")
-    rows = []
-    for t in st.tasks:
-        if not t.deadline:
+
+    horizon = str(args.horizon or "day").lower()
+    if horizon not in ("day", "week", "month"):
+        raise SystemExit("horizon must be one of: day, week, month")
+    days = 1 if horizon == "day" else (7 if horizon == "week" else 30)
+
+    minutes_today = args.minutes_today
+    minutes_per_day = args.minutes_per_day
+    if minutes_today is None and minutes_per_day is None:
+        raise SystemExit("simulate requires --minutes-today (single day) or --minutes-per-day (multi-day).")
+    if minutes_today is not None and minutes_per_day is not None:
+        raise SystemExit("Use either --minutes-today or --minutes-per-day, not both.")
+    if minutes_today is not None and horizon != "day":
+        raise SystemExit("--minutes-today is only valid with --horizon day.")
+    if minutes_per_day is not None and horizon == "day":
+        days = 1
+
+    req_per_day = max(0, _to_int(minutes_today if minutes_today is not None else minutes_per_day, 0))
+    if req_per_day <= 0:
+        raise SystemExit("Requested minutes must be > 0")
+
+    base_tasks = [copy.deepcopy(t) for t in st.tasks if t.deadline]
+    task_map_before = {t.id: copy.deepcopy(t) for t in base_tasks}
+    tmp_state = copy.deepcopy(st)
+    tmp_state.tasks = base_tasks
+
+    daily_rows: List[Dict[str, Any]] = []
+    total_used = 0
+    start = _today()
+    for i in range(days):
+        d = start + dt.timedelta(days=i)
+        cap_blocks = day_capacity_blocks(st, d)
+        cap_minutes = cap_blocks * st.plan_block_min
+        budget = min(req_per_day, cap_minutes)
+        alloc: Dict[str, int] = {}
+        if budget > 0:
+            if target:
+                tt = get_task_by_id(tmp_state, target)
+                if tt and tt.deadline and tt.remaining_minutes > 0:
+                    take = min(int(budget), int(tt.remaining_minutes))
+                    if take > 0:
+                        alloc[target] = take
+                        tt.remaining_minutes = max(0, tt.remaining_minutes - take)
+            else:
+                alloc = allocate_minutes_budget(tmp_state, int(budget))
+                for tid, mm in alloc.items():
+                    tt = get_task_by_id(tmp_state, tid)
+                    if tt:
+                        tt.remaining_minutes = max(0, tt.remaining_minutes - int(mm))
+        used = sum(alloc.values())
+        total_used += used
+        daily_rows.append({
+            "date": d.isoformat(),
+            "cap_minutes": cap_minutes,
+            "requested": req_per_day,
+            "used": used,
+            "allocation": alloc,
+        })
+
+    print(
+        f"COUNTERFACTUAL horizon={horizon} ({days} day(s)) | request={req_per_day} min/day | "
+        f"used_total={total_used} min"
+    )
+    print("daily plan:")
+    for r in daily_rows[:14]:
+        print(f"  {r['date']} | cap={r['cap_minutes']} | req={r['requested']} | used={r['used']} | alloc={r['allocation']}")
+    if len(daily_rows) > 14:
+        print(f"  ... {len(daily_rows)-14} more day(s)")
+
+    print("task impact:")
+    for t_before in task_map_before.values():
+        t_after = get_task_by_id(tmp_state, t_before.id)
+        if not t_after:
             continue
-        cur_slack = task_slack_blocks(st, t)
-        rem2 = max(0, t.remaining_minutes - (mm if (target is None or t.id == target) else 0))
-        need2 = int(math.ceil(max(0, rem2) / max(1, st.plan_block_min)))
-        cap2 = task_capacity_blocks(st, t)
-        slack2 = cap2 - need2
-        p0, b0, _ = deadline_risk(st, t)
-        t2 = Task(
-            id=t.id, domain=t.domain, name=t.name, deadline=t.deadline,
-            total_minutes=t.total_minutes, remaining_minutes=rem2,
-            tmt_bins=t.tmt_bins, recent_drift_count=t.recent_drift_count,
-        )
-        p1, b1, _ = deadline_risk(st, t2)
-        rows.append((t.id, t.name, cur_slack, slack2, p0, b0, p1, b1))
-    print(f"COUNTERFACTUAL: log {mm} minute(s) today " + (f"to task={target}" if target else "across all tasks with deadlines"))
-    for r in rows:
+        p0, b0, _ = deadline_risk(st, t_before)
+        p1, b1, _ = deadline_risk(tmp_state, t_after)
+        s0 = task_slack_blocks(st, t_before)
+        s1 = task_slack_blocks(tmp_state, t_after)
+        alloc_total = max(0, t_before.remaining_minutes - t_after.remaining_minutes)
         print(
-            f"{r[0]} | {r[1]} | slack {r[2]} -> {r[3]} | "
-            f"risk {r[5]}({_fmt_num(r[4])}) -> {r[7]}({_fmt_num(r[6])})"
+            f"{t_before.id} | {t_before.name} | alloc={alloc_total} | "
+            f"slack {s0}->{s1} | risk {b0}({_fmt_num(p0)})->{b1}({_fmt_num(p1)})"
         )
 def cmd_genome(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
@@ -3971,6 +4789,7 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("--no-haghbin", action="store_true")
     sr.add_argument("--fitness", default=None)
     sr.add_argument("--homeostat", default=None)
+    sr.add_argument("--force-switch", action="store_true", help="Override System 2 anti-oscillation switch damping")
     sr.set_defaults(func=cmd_run)
 
     sdbg = sub.add_parser("debug")
@@ -4016,10 +4835,46 @@ def build_parser() -> argparse.ArgumentParser:
     spol_set.add_argument("--quiet-clear", action="store_true")
     spol_set.set_defaults(func=cmd_policy)
 
+    ss2 = sub.add_parser("system2")
+    ss2sub = ss2.add_subparsers(dest="action", required=True)
+    ss2sub.add_parser("show").set_defaults(func=cmd_system2)
+    ss2set = ss2sub.add_parser("set")
+    ss2set.add_argument("--enabled", choices=["on", "off"], default=None)
+    ss2set.add_argument("--min-task-stick-min", type=int, default=None)
+    ss2set.add_argument("--max-switches-per-day", type=int, default=None)
+    ss2set.add_argument("--prefer-current-if-not-urgent", choices=["on", "off"], default=None)
+    ss2set.set_defaults(func=cmd_system2)
+    ss2cal = ss2sub.add_parser("calibrate")
+    ss2cal.add_argument("--apply", action="store_true")
+    ss2cal.set_defaults(func=cmd_system2)
+
     ssim = sub.add_parser("simulate")
-    ssim.add_argument("--minutes-today", type=int, required=True)
-    ssim.add_argument("--task", default=None, help="Optional task_id; if omitted applies minutes to all deadline tasks")
+    ssim.add_argument("--horizon", choices=["day", "week", "month"], default="day")
+    ssim.add_argument("--minutes-today", type=int, default=None, help="Single-day minutes (horizon=day)")
+    ssim.add_argument("--minutes-per-day", type=int, default=None, help="Requested daily minutes for multi-day simulation")
+    ssim.add_argument("--task", default=None, help="Optional task_id; if omitted allocates across deadline tasks")
     ssim.set_defaults(func=cmd_simulate)
+
+    srisk = sub.add_parser("risk")
+    srisksub = srisk.add_subparsers(dest="action", required=True)
+    srisksub.add_parser("show").set_defaults(func=cmd_risk)
+    srisk_set = srisksub.add_parser("set")
+    srisk_set.add_argument("--intercept", type=float, default=None)
+    srisk_set.add_argument("--w-neg-slack", dest="w_neg_slack", type=float, default=None)
+    srisk_set.add_argument("--w-zero-slack", dest="w_zero_slack", type=float, default=None)
+    srisk_set.add_argument("--w-low-slack", dest="w_low_slack", type=float, default=None)
+    srisk_set.add_argument("--w-drift-cluster", dest="w_drift_cluster", type=float, default=None)
+    srisk_set.add_argument("--w-recent-drift", dest="w_recent_drift", type=float, default=None)
+    srisk_set.add_argument("--w-deadline-near", dest="w_deadline_near", type=float, default=None)
+    srisk_set.add_argument("--w-days-urgency", dest="w_days_urgency", type=float, default=None)
+    srisk_set.add_argument("--w-slack-buffer", dest="w_slack_buffer", type=float, default=None)
+    srisk_set.add_argument("--w-remaining-load", dest="w_remaining_load", type=float, default=None)
+    srisk_set.add_argument("--cut-med", dest="cut_med", type=float, default=None)
+    srisk_set.add_argument("--cut-high", dest="cut_high", type=float, default=None)
+    srisk_set.set_defaults(func=cmd_risk)
+    srisk_cal = srisksub.add_parser("calibrate")
+    srisk_cal.add_argument("--apply", action="store_true")
+    srisk_cal.set_defaults(func=cmd_risk)
 
     sg = sub.add_parser("genome")
     sgsub = sg.add_subparsers(dest="action", required=True)
@@ -4105,6 +4960,39 @@ def build_parser() -> argparse.ArgumentParser:
     sethsub.add_parser("show").set_defaults(func=cmd_ethics)
 
     scca = sub.add_parser("cca"); scca.set_defaults(func=cmd_cca)
+
+    scontrol = sub.add_parser("controlroom")
+    scontrol_sub = scontrol.add_subparsers(dest="action", required=True)
+    scontrol_sub.add_parser("show").set_defaults(func=cmd_controlroom)
+
+    sforecast = sub.add_parser("forecast")
+    sforecast_sub = sforecast.add_subparsers(dest="action", required=True)
+    sforecast_show = sforecast_sub.add_parser("show")
+    sforecast_show.add_argument("--days", type=int, default=14)
+    sforecast_show.add_argument("--top", type=int, default=10)
+    sforecast_show.set_defaults(func=cmd_forecast)
+
+    sconst = sub.add_parser("constitution")
+    sconst_sub = sconst.add_subparsers(dest="action", required=True)
+    sconst_sub.add_parser("check").set_defaults(func=cmd_constitution)
+
+    sclose = sub.add_parser("close")
+    sclose_sub = sclose.add_subparsers(dest="action", required=True)
+    sclose_sub.add_parser("day").set_defaults(func=cmd_close)
+
+    sexplain = sub.add_parser("explain")
+    sexsub = sexplain.add_subparsers(dest="action", required=True)
+    sexsub.add_parser("today").set_defaults(func=cmd_explain)
+    sexd = sexsub.add_parser("decision")
+    sexd.add_argument("--task", default=None)
+    sexd.add_argument("--domain", default=None)
+    sexd.add_argument("--name", default=None)
+    sexd.add_argument("--kind", choices=["d", "p"], default="d")
+    sexd.add_argument("--label", default=None)
+    sexd.add_argument("--trigger", default="other")
+    sexd.add_argument("--min-gap", type=int, default=6)
+    sexd.add_argument("--max-gap", type=int, default=14)
+    sexd.set_defaults(func=cmd_explain)
 
     return p
 

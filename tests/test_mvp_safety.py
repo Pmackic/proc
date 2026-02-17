@@ -76,6 +76,33 @@ class TestMVPSafety(unittest.TestCase):
         notes = " ".join(comps.get("dag_notes") or [])
         self.assertIn("DAG fallback", notes)
 
+    def test_allocate_minutes_budget_is_fixed_total(self) -> None:
+        self.st.tasks = [
+            p.Task(id="a", domain="x", name="A", deadline="2026-03-01", total_minutes=300, remaining_minutes=300, tmt_bins=p.TMTBins(), recent_drift_count=0),
+            p.Task(id="b", domain="x", name="B", deadline="2026-04-01", total_minutes=300, remaining_minutes=300, tmt_bins=p.TMTBins(), recent_drift_count=0),
+        ]
+        alloc = p.allocate_minutes_budget(self.st, 90)
+        self.assertLessEqual(sum(alloc.values()), 90)
+        self.assertGreaterEqual(sum(alloc.values()), 1)
+
+    def test_recompute_habit_from_logs(self) -> None:
+        y = (p._today() - p.dt.timedelta(days=1)).isoformat()
+        p.LOG_FILE.write_text(
+            f'{{"ts":"{y}T10:00:00","kind":"log_minutes","minutes":30}}\n',
+            encoding="utf-8",
+        )
+        p.recompute_habit_from_logs(self.st)
+        self.assertFalse(self.st.today_min_done)
+        self.assertEqual(self.st.streak, 1)
+
+    def test_system2_switch_damping(self) -> None:
+        self.st.system2["enabled"] = True
+        self.st.system2["min_task_stick_min"] = 30
+        recs = []
+        ok, why = p.system2_switch_decision(self.st, recs, "a", "b")
+        self.assertFalse(ok)
+        self.assertIn("min_task_stick_min", why)
+
 
 if __name__ == "__main__":
     unittest.main()

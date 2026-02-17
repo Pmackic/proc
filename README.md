@@ -13,6 +13,20 @@ Python stdlib only. Target: Python 3.10+.
 
 See the detailed spec: `prok_spec_v5.md` and `PROK_v5_methodology.md`.
 
+Integrated model (runtime):
+
+```text
+Tasks + Calendar(.ics) + Constraints
+  -> planner + feasibility/risk
+  -> run session (checks/self-report)
+  -> candidate actions
+  -> homeostat safety filter/score
+  -> fitness + goals ranking
+  -> phenomenology (phi/fep/dag) top-K refinement
+  -> execute + log decision trace/reason codes
+  -> NK slow-loop updates genome for next runs
+```
+
 ---
 
 ## Quick start
@@ -126,12 +140,44 @@ python prok_v5.py policy set --max-checks-per-hour 8 --quiet-add 13:00-14:00
 python prok_v5.py policy set --quiet-clear
 ```
 
+### `system2`
+System 2 anti-oscillation coordination (Stafford Beer): damp excessive task switching while preserving override rights.
+
+```bash
+python prok_v5.py system2 show
+python prok_v5.py system2 set --enabled on --min-task-stick-min 25 --max-switches-per-day 4 --prefer-current-if-not-urgent on
+python prok_v5.py system2 calibrate
+python prok_v5.py system2 calibrate --apply
+```
+
+During `run`, if you request a task switch that System 2 suppresses, use:
+```bash
+python prok_v5.py run --task <task_id> --force-switch
+```
+
 ### `simulate`
 Counterfactual quick check: estimate slack/risk change if you log minutes today.
 
 ```bash
 python prok_v5.py simulate --minutes-today 60 --task <task_id>
 python prok_v5.py simulate --minutes-today 30
+python prok_v5.py simulate --horizon week --minutes-per-day 90
+python prok_v5.py simulate --horizon month --minutes-per-day 60 --task <task_id>
+```
+
+Notes:
+- with `--task`, all minutes are assigned to that task
+- without `--task`, minutes are treated as a fixed total budget and allocated across deadline tasks by urgency/risk
+- multi-day modes are capacity-aware (day windows + blackouts); output includes daily allocation and total task impact
+
+### `risk`
+Inspect/tune deadline-risk model parameters used in `today/status/simulate`.
+
+```bash
+python prok_v5.py risk show
+python prok_v5.py risk set --intercept -1.2 --w-neg-slack 2.5 --w-deadline-near 1.0 --w-days-urgency 1.2 --w-slack-buffer 1.5 --w-remaining-load 0.8 --cut-med 0.35 --cut-high 0.70
+python prok_v5.py risk calibrate
+python prok_v5.py risk calibrate --apply
 ```
 
 ### `debug decision`
@@ -139,6 +185,24 @@ Prints the recovery decision trace for a simulated disturbance without starting 
 
 ```bash
 python prok_v5.py debug decision --task <task_id> --kind d --trigger distraction
+```
+
+### `explain`
+Explainability views across VSM layers (S1–S5).
+
+```bash
+python prok_v5.py explain today
+python prok_v5.py explain decision --task <task_id> --kind d --trigger distraction
+```
+
+### `controlroom`, `forecast`, `constitution`, `close`
+Management views and daily governance loop:
+
+```bash
+python prok_v5.py controlroom show
+python prok_v5.py forecast show --days 14 --top 10
+python prok_v5.py constitution check
+python prok_v5.py close day
 ```
 
 ---
@@ -395,6 +459,15 @@ python prok_v5.py phenom show
 ```bash
 python prok_v5.py phenom audit --out PHENOM_AUDIT_EXAMPLE.md
 python prok_v5.py export --out prok_bundle.zip
+```
+
+### 7) Daily governance loop (Beer S2-S5)
+
+```bash
+python prok_v5.py controlroom show
+python prok_v5.py forecast show --days 14
+python prok_v5.py constitution check
+python prok_v5.py close day
 ```
 
 ---

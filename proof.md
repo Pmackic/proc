@@ -397,6 +397,58 @@ Therefore:
 
 So structural transfer improves discrimination inside the safe manifold without enlarging unsafe phase space.
 
+---
+
+## 16. VSM decomposition theorem for PROK
+
+### 16.1 Claimed mapping
+The implemented architecture is interpreted as:
+- `S1`: task operational units,
+- `S2`: inter-task anti-oscillation coordination,
+- `S3`: today-level control/allocation under constraints,
+- `S4`: horizon forecasting/adaptation to deadlines and scenarios,
+- `S5`: policy/identity/ethical supervision.
+
+### 16.2 Laws used (Beer/Ashby cybernetics)
+The proof uses these necessary laws/principles:
+- **Law of Requisite Variety:** regulator variety must match effective disturbance variety.
+- **Variety engineering law:** viability requires balancing attenuation and amplification across channels.
+- **Recursion law (VSM):** each viable unit contains/embeds the same regulatory logic at nested levels.
+- **System-2 anti-oscillation principle:** operational units with local autonomy require continuous damping to avoid destructive oscillation.
+- **Algedonic signaling principle:** critical boundary breaches must propagate rapidly to policy/control redesign.
+
+### 16.3 Proof sketch of appropriateness
+1) From requisite variety + attenuation/amplification:
+- per-task disturbances are high-variety and context-dependent;
+- therefore multiple operational controllers are required (`S1`) plus coordination (`S2`) and meta-control (`S3/S4/S5`) to preserve essential variables.
+
+2) From anti-oscillation principle:
+- autonomous task units interacting through shared time/resources create switching and scheduling oscillations;
+- hence a dedicated damping service (`S2`) is logically necessary and cannot be reduced to ad-hoc command.
+
+3) From present-vs-future control separation:
+- feasibility today and adaptability across deadline horizon are distinct control problems;
+- therefore `S3` (inside-and-now) and `S4` (outside-and-then) must be separated to avoid myopic or over-delayed control.
+
+4) From policy/identity closure:
+- admissibility constraints (homeostat, autonomy rights, asymmetry doctrine) must govern all lower loops;
+- hence `S5` is required as constitutional supervisor.
+
+5) From algedonic signaling:
+- when feasibility/drift boundaries are crossed, `ok/warning/critical` must trigger structural correction;
+- this couples `S1..S4` behavior back to `S5` governance, completing viability closure.
+
+Therefore the proposed mapping (`S1..S5` above) is not arbitrary; it is the minimal decomposition consistent with the cited cybernetic laws for this regulator class.
+
+### 16.4 Corollary (diagnostic use)
+Failure signatures map directly to VSM loci:
+- chronic switching thrash -> `S2` under-capacity,
+- daily infeasibility despite long-horizon slack -> `S3` allocation failure,
+- repeated deadline surprises -> `S4` forecasting failure,
+- coercive or identity-inconsistent control -> `S5` policy failure.
+
+Hence the mapping is not only descriptive, but operationally falsifiable.
+
 with `W_eff = h(W)` the effective phenomenological space of observed disturbances.
 The regulator acts on `U` through:
 
