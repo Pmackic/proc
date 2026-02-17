@@ -6,6 +6,8 @@ What’s new in v5:
 - **Multi-task planning** with per-task slack and active task targeting
 - **Per-domain recursion signals** (drift EMA) and **task-level recovery stats**
 - **Algedonic alarm** (`ok | warning | critical`) that flags structural infeasibility and recommends fixes
+- **Homeostat engine** (`require/penalty/prefer`) that safety-filters and scores recovery candidates
+- **NK slow loop** that adapts genome choices across sessions from outcome feedback
 
 Python stdlib only. Target: Python 3.10+.
 
@@ -20,6 +22,7 @@ Run from an empty folder (recommended: one folder per user/study):
 ```bash
 python prok_v5.py task add --domain skola --name "bio ch3" --hours 20 --deadline 2mo
 python prok_v5.py task add --domain work --name "report" --hours 6 --deadline 2026-03-01
+python prok_v5.py calendar import --ics my_calendar.ics
 python prok_v5.py task list
 python prok_v5.py today
 python prok_v5.py run --task <task_id> --checks auto
@@ -114,6 +117,30 @@ Shows global and per-task summaries, including alarm state.
 python prok_v5.py status
 ```
 
+### `policy`
+Set policy constraints used during runs (check caps + quiet windows).
+
+```bash
+python prok_v5.py policy show
+python prok_v5.py policy set --max-checks-per-hour 8 --quiet-add 13:00-14:00
+python prok_v5.py policy set --quiet-clear
+```
+
+### `simulate`
+Counterfactual quick check: estimate slack/risk change if you log minutes today.
+
+```bash
+python prok_v5.py simulate --minutes-today 60 --task <task_id>
+python prok_v5.py simulate --minutes-today 30
+```
+
+### `debug decision`
+Prints the recovery decision trace for a simulated disturbance without starting a session.
+
+```bash
+python prok_v5.py debug decision --task <task_id> --kind d --trigger distraction
+```
+
 ---
 
 ## Constraints (blackouts)
@@ -128,6 +155,22 @@ python prok_v5.py blackout add --daterange 2026-04-01..2026-04-07 --label vacati
 python prok_v5.py blackout list
 python prok_v5.py blackout clear
 ```
+
+## Calendar import (ICS)
+
+Import calendar events as planning blackouts so `today`/replan/run capacity automatically respects them.
+
+```bash
+python prok_v5.py calendar import --ics my_calendar.ics
+python prok_v5.py calendar show
+python prok_v5.py calendar clear
+```
+
+Notes:
+- one-off timed events become date-time blackouts
+- all-day events become date/date-range blackouts
+- weekly RRULE events (`FREQ=WEEKLY`) become weekly blackouts
+- import replaces previous calendar-imported blackouts by default; use `--replace-all` to replace manual blackouts too
 
 ---
 
@@ -219,6 +262,29 @@ python prok_v5.py fitness write-default --out fitness.default.prokfit
 python prok_v5.py fitness set fitness.default.prokfit
 ```
 
+### Homeostat DSL (advanced)
+
+Homeostat is applied before fitness ranking:
+- `require` = hard veto (when alternatives exist)
+- `penalty N:` = soft cost
+- `prefer N:` = soft bonus
+
+```bash
+python prok_v5.py homeostat show
+python prok_v5.py homeostat write-default --out homeostat.default.prokfit
+python prok_v5.py homeostat set homeostat.default.prokfit
+```
+
+### NK loop (advanced)
+
+NK adapts genome policy over time (exploit/explore, local memory tables):
+
+```bash
+python prok_v5.py nk show
+python prok_v5.py nk set --enabled on --k 2
+python prok_v5.py nk reset
+```
+
 ---
 
 ## Mathematical phenomenology (new)
@@ -240,6 +306,8 @@ python prok_v5.py phenom set --enabled on --mode fep --min-samples 3 --influence
 python prok_v5.py phenom set --lambda-procrast 0.60 --mu-overcontrol 0.25
 # optional FEP uncertainty/exploration weights:
 python prok_v5.py phenom set --beta-ambiguity 0.20 --eta-epistemic 0.10
+# DAG causal mode (backdoor/IPW-style correction from logs):
+python prok_v5.py phenom set --mode dag --dag-kappa 0.30 --dag-adjust domain,label,trigger,slack,drift --dag-min-samples 5 --dag-laplace 1.0
 ```
 
 Clear learned signatures (keep settings):
@@ -255,7 +323,7 @@ python prok_v5.py phenom audit --log some_run.jsonl --out audit.md
 ```
 
 Selection behavior:
-- baseline candidate ranking still uses fitness DSL + goals
+- baseline candidate ranking uses homeostat + fitness DSL + goals
 - phenomenology can override within the top candidates only when enough evidence exists
 - evidence gate is controlled by `--min-samples`
 - override sensitivity is controlled by `--influence` (0..1)
@@ -264,9 +332,70 @@ Selection behavior:
   - default asymmetry: `lambda_procrast > mu_overcontrol`
 - in `--mode fep`, score adds uncertainty + learning terms:
   - `score = phi - beta_ambiguity*ambiguity + eta_epistemic*epistemic`
+- in `--mode dag`, score adds causal correction:
+  - estimate `E[helped | do(action)]` and `E[overcontrol | do(action)]` from logs with backdoor-adjusted IPW over configured covariates (`--dag-adjust`)
+  - `score = phi + dag_kappa * ((do_helped - 0.5) - mu_overcontrol*do_overcontrol)`
+  - still restricted to top-K baseline-safe candidates (homeostat envelope preserved)
 
 Logs:
-- `course_correct` events now include `phenomenology_signature` and `selection_source`
+- `course_correct` events now include `phenomenology_signature`, `selection_source`, and `homeostat_ctx` (covariates for DAG mode)
+- when DAG data are sparse, runtime prints `DAG note: ...` fallback warnings
+
+---
+
+## Tutorial (end-to-end)
+
+Use this once in a fresh folder:
+
+### 1) Create tasks
+
+```bash
+python prok_v5.py task add --domain skola --name "MAT" --hours 10 --deadline 2026-03-12
+python prok_v5.py task add --domain work --name "report" --hours 6 --deadline 2026-03-01
+python prok_v5.py task list
+```
+
+### 2) Configure planner window
+
+```bash
+python prok_v5.py config set --block-min 50 --tiny-min 10 --day-start 08:00 --day-end 22:00 --max-blocks-per-day 6
+python prok_v5.py today
+```
+
+### 3) Enable homeostat + NK
+
+```bash
+python prok_v5.py homeostat write-default --out homeostat.default.prokfit
+python prok_v5.py homeostat set homeostat.default.prokfit
+python prok_v5.py nk set --enabled on --k 2
+python prok_v5.py nk show
+```
+
+### 4) Run one focus block
+
+```bash
+python prok_v5.py run --task <task_id> --checks auto --ask-trigger dp
+```
+
+During run:
+- type `d` or `p` + Enter to trigger course-correction
+- type `c` + Enter to force a check
+- type `q` + Enter to quit
+
+### 5) Review adaptation
+
+```bash
+python prok_v5.py status
+python prok_v5.py nk show
+python prok_v5.py phenom show
+```
+
+### 6) Audit and export
+
+```bash
+python prok_v5.py phenom audit --out PHENOM_AUDIT_EXAMPLE.md
+python prok_v5.py export --out prok_bundle.zip
+```
 
 ---
 

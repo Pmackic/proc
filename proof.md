@@ -93,6 +93,13 @@ Concrete varieties:
 - `W_eff`: combinations of trigger class × drift/procrastination label × context bins.
 - `A`: recovery family × check-gap policy × block sizing (from genome bins).
 
+Implemented routing order (runtime):
+1) homeostat filter/score (`require`, `penalty`, `prefer`)
+2) fitness + goal-profile ranking
+3) phenomenology re-ranking inside top-K (evidence-gated)
+
+So the actionable set is the homeostat-feasible subset `A_H ⊆ A`, and the deployed action is selected from `A_H`.
+
 Thus, to avoid feasibility collapse in worst-case contexts, the number of distinct
 policy responses must match or exceed the number of distinguishable disturbances.
 
@@ -257,6 +264,138 @@ We define a homology-style correspondence between model space and observation sp
 ```
 h: W -> U
 ```
+
+### 11.1 Homomorphism to machine state (formal)
+
+Let `R` be the (high-dimensional) reality state space and `X` the machine state space used by PROK.
+Define a projection:
+
+```
+pi: R -> X
+```
+
+where `pi` preserves the operational algebra of predicates used in control:
+- feasibility/slack bins,
+- disturbance label/trigger bins,
+- TMT bins,
+- domain/task identity bins.
+
+For admissible reality transitions `T_R` and machine transitions `T_X`, the required relation is:
+
+```
+pi(T_R(r, a, w)) ~ T_X(pi(r), a, h(w))
+```
+
+where `~` is equality up to the chosen discretization/bins.  
+This is the working homomorphism claim: machine dynamics preserve relevant control structure, not full physical detail.
+
+### 11.2 Phenomenology as constrained isomorphism over signature classes
+
+Define signature map:
+
+```
+sigma = SIG(domain, label, trigger, theta) in Sigma
+```
+
+and equivalence relation:
+
+```
+r1 ≈ r2  iff  SIG(pi(r1)) = SIG(pi(r2)).
+```
+
+Phenomenology memory operates on the quotient space `X/≈`:
+- it treats episodes in the same class as structurally homologous,
+- transfers action preference statistics within that class.
+
+Thus, phenomenology is not an isomorphism between full `R` and full `X`; it is a constrained class-level isomorphism claim on invariants selected by `SIG`.
+
+### 11.3 Relative-validity condition (important)
+
+All homomorphism/isomorphism claims are relative to the observable/discretized algebra.  
+If causally relevant factors are omitted from `pi` or `SIG`, classes may mix non-homologous cases and transfer quality degrades.  
+This is precisely why v5 supports:
+- configurable covariates in DAG mode,
+- evidence thresholds (`n_min`),
+- influence threshold (`tau`),
+- top-K and homeostat constraints.
+
+---
+
+## 12. Lemma (Homeostat-Restricted Requisite Variety)
+
+Let `A_H(u)` be the set of actions that pass homeostat `require` constraints for observation class `u`.
+
+Then robust feasibility requires:
+
+```
+|A_H| >= |W_eff|
+```
+
+under the same worst-case distinguishability assumptions as Theorem 3.
+
+Interpretation:
+- adding a homeostat layer improves safety by vetoing dangerous moves,
+- but also shrinks available action variety,
+- therefore policy design must preserve enough post-veto variety (`A_H`) to satisfy Ashby bounds.
+
+This is exactly why PROK v5 now combines:
+- hard `require` rules for safety,
+- soft `penalty/prefer` scoring (instead of only hard constraints),
+- NK tuning over genome knobs to recover useful variety inside the safe envelope.
+
+## 13. Lemma (NK Slow-Loop Capacity Growth, Empirical)
+
+Define the empirical NK estimate `Phi_hat(g)` from local main/pair tables and session utility updates.
+The runtime loop evaluates one-step neighbors and applies epsilon-greedy selection (exploit/explore).
+
+Then:
+- with non-zero exploration, every one-step neighbor is visited infinitely often in the limit (standard epsilon-greedy condition, assuming persistent sessions),
+- empirical estimates for visited genotypes converge in sample mean,
+- exploit steps asymptotically concentrate on high-`Phi_hat` genotypes subject to the homeostat envelope.
+
+Practical implication:
+- the NK loop does not replace Ashby/homeostat constraints,
+- it improves controller adaptation *within* safe admissible space,
+- and therefore increases effective control quality without removing safety vetoes.
+
+## 14. Lemma (Backdoor-Adjusted Refinement in DAG Mode)
+
+In phenomenology `dag` mode, define observed covariates `C` (configured adjustment set), action `A`, and outcomes:
+- `Y_h`: helped indicator
+- `Y_o`: overcontrol indicator (`burden>=4`)
+
+If backdoor admissibility holds for `C` with respect to `A -> Y`, then:
+
+```
+E[Y | do(A=a)] = sum_c E[Y | A=a, C=c] P(C=c)
+```
+
+The runtime uses an IPW-style finite-sample estimator for these interventional means and adds:
+
+```
+delta_do(a) = (do_helped(a) - 0.5) - mu_overcontrol * do_overcontrol(a)
+score_dag(a) = phi(a) + kappa * delta_do(a)
+```
+
+Because re-ranking is still constrained to homeostat-feasible top-K candidates, DAG adjustment modifies ordering within the admissible set but does not violate safety constraints.
+
+## 15. Lemma (Safety-Preserving Structural Transfer)
+
+Let `A_H(u)` be the homeostat-feasible action set for observation class `u`, and `A_K(u) subseteq A_H(u)` the top-K baseline-ranked candidates.
+Let `f0(u)` be baseline choice and `fM(u)` the phenomenology-refined choice.
+
+By construction in PROK v5:
+
+```
+fM(u) in A_K(u) subseteq A_H(u)
+```
+
+Therefore:
+- transfer may change which admissible action is chosen,
+- but cannot introduce an inadmissible action,
+- and cannot bypass homeostat feasibility constraints.
+
+So structural transfer improves discrimination inside the safe manifold without enlarging unsafe phase space.
 
 with `W_eff = h(W)` the effective phenomenological space of observed disturbances.
 The regulator acts on `U` through:

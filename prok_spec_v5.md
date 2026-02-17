@@ -222,6 +222,9 @@ Minimal components:
 - progress logs: minutes done, miss minimum
 - optional trigger tag r_t
 - optional Haghbin flags (fast prompts)
+- calendar context features (time-to-next-event, event density via imported blackouts)
+- circadian context bin (morning/afternoon/evening/night)
+- policy-constraint state (max checks/hour, quiet windows)
 
 Study mode adds:
 - burden rating (e.g., 1–5) after interventions
@@ -344,13 +347,13 @@ Interpretation:
 - it increases effective control precision without changing canonical state/action alphabets
 - all memory is local-first and auditable in state/log files
 
-### 9.2 Algorithm visual (layer interaction)
+### 9.2 Algorithm visual (layer interaction, implemented)
 ```text
 DISTURBANCE/EPISODE
   -> state update (TMT/drift/slack/alarm)
   -> gene-policy candidate generation
-  -> homeostat safety filter (require/veto)
-  -> fitness+goals ranking
+  -> homeostat engine (require/veto + penalty/prefer score)
+  -> fitness+goals ranking (inside homeostat-feasible set)
   -> phenomenology signature check
        if n>=n_min and score>=tau: re-rank within top-K
   -> execute action (+ tighten checks / replan)
@@ -386,6 +389,56 @@ Interpretation of the Old Sailor's scalar:
 Optional FEP-style mode:
 - `score = phi - beta_ambiguity*ambiguity + eta_epistemic*epistemic`
 - this preserves the same ethical asymmetry while explicitly accounting for uncertainty and controlled exploration.
+
+Implemented DAG mode:
+- `mode = dag` adds a backdoor/IPW-style causal correction from logged intervention outcomes.
+- Uses configured adjustment covariates (default: `domain,label,trigger,slack,drift`) and Laplace-smoothed propensity estimates.
+- Causal term:
+  - `do_helped(a) = E[helped | do(a)]`
+  - `do_overcontrol(a) = E[burden>=4 | do(a)]`
+  - `score_dag = phi + dag_kappa * ((do_helped(a)-0.5) - mu_overcontrol*do_overcontrol(a))`
+- Still constrained to homeostat-feasible top-K candidates.
+
+### 9.4 Homeostat engine (implemented)
+v5 runtime includes a dedicated homeostat DSL and evaluator:
+- rules: `require`, `penalty N: ...`, `prefer N: ...`
+- requires are hard constraints (veto when feasible alternatives exist)
+- soft score is `penalty_sum - prefer_sum`
+- candidate ordering is lexicographic:
+  1) homeostat score (lower is better),
+  2) fitness DSL + goal profile ranking,
+  3) phenomenology re-rank (top-K only, evidence-gated).
+
+Default bins used by the homeostat context:
+- `slack`: `neg|low|ok|high`
+- `progress`: `down|flat|up|surge`
+- `recovery`: `slow|ok|fast|instant`
+- `annoyance`: `high|med|low|none`
+- `drift`: `high|med|low|none`
+- `stability`: `fragile|wobbly|steady|stable`
+
+CLI support:
+- `prok homeostat show`
+- `prok homeostat write-default --out homeostat.default.prokfit`
+- `prok homeostat set <path>`
+
+DAG config is set through `phenom set`:
+- `--mode dag`
+- `--dag-kappa`
+- `--dag-adjust`
+- `--dag-min-samples`
+- `--dag-laplace`
+
+### 9.5 Additional integrated model features (implemented baseline)
+- Calendar import to blackout constraints (`calendar import/show/clear`) including date-time blocks.
+- Deadline risk estimator (`low|med|high`) from slack + drift + deadline proximity.
+- Policy constraints during sessions:
+  - check-rate cap (`max_checks_per_hour`)
+  - quiet windows where checks are suppressed.
+- Decision-trace logging:
+  - reason codes and candidate ranking traces in `course_correct` events.
+- Counterfactual planning probe:
+  - `simulate --minutes-today ...` estimates slack/risk deltas under alternative effort today.
 
 ---
 
@@ -426,6 +479,22 @@ with |N_i| = K.
 Each f_{i,z} is a small table learned from outcomes.
 
 **Empirical substitution point:** estimate K and interaction neighborhoods N_i using controlled policy perturbations.
+
+### 10.6 NK slow loop (implemented in v5 runtime)
+The CLI now runs a local NK-compatible adaptation loop:
+- before `run`: build one-step mutant neighbors from current genotype;
+- predict candidate utility from learned `main` and `pair` tables;
+- choose exploit/explore candidate using `g10_explore` (`off|low|med|high`);
+- execute session with selected genome;
+- after session: record utility from feasibility/progress/disturbance/check burden/quit terms;
+- update `main` and `pair` tables (local memory, auditable in state).
+
+This is a bounded, local, discrete hill-climb + epsilon exploration loop, consistent with the NK framing and the homeostat-first safety order.
+
+CLI support:
+- `prok nk show`
+- `prok nk set --enabled on|off --k <int>`
+- `prok nk reset`
 
 ---
 

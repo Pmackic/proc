@@ -71,6 +71,18 @@ v5 adds **task-level** and **domain-level** essential variables:
 - per-task completion and recovery outcomes
 - per-domain drift EMA (stability by domain)
 
+Integrated model components (evaluated within the study, not as separate tracks):
+- calendar-aware routing features (time-to-next-event, event density) in policy selection,
+- energy/circadian bins as context moderators for intervention efficacy,
+- dependency-aware task graph constraints in replanning,
+- deadline hazard/risk bins feeding alarm/homeostat predicates,
+- causal phenomenology estimators (IPW baseline, DR upgrades where feasible),
+- counterfactual planning probes for projected slack/alarm under alternative effort plans,
+- explicit user policy constraints (check caps, no-prompt windows),
+- decision reason codes for per-step auditability,
+- staleness/confidence decay in signature and NK memory,
+- incremental online updates for large-log operation.
+
 ### Discrete motivational layer (TMT bins)
 Discrete bins:  
 - Expectancy **E ∈ {L,M,H}**  
@@ -206,6 +218,10 @@ Items derived from:
 - Outcome: recovered within X minutes (yes/no)
 - Burden/annoyance rating (optional 1–5)
 - Daily: minutes progressed and perceived success
+- Calendar proximity features (time-to-next-event, event density in day window)
+- Energy/circadian bin (time-of-day + optional fatigue self-report)
+- Task dependency context (blocked by prerequisite yes/no)
+- Decision trace fields (homeostat/fitness/phenom/NK reason codes)
 
 ### 7.2 Analyses
 **State dynamics**
@@ -233,9 +249,23 @@ Items derived from:
 - Transfer gain: delta in recovery success/time when selection source is `fitness+phenomenology` vs `fitness` only
 - Confidence gating effect: how often overrides are blocked by evidence threshold or influence threshold
 
+**Causal-DAG phenomenology diagnostics (implemented option)**
+- When `mode=dag`, estimate action effects with backdoor-adjusted IPW within logged course-correct events.
+- Required covariates are configurable (`dag_adjust`; default `domain,label,trigger,slack,drift`).
+- Core estimands:
+  - `E[helped | do(action)]`
+  - `E[overcontrol | do(action)]`, where overcontrol is `burden>=4`
+- DAG-adjusted score term:
+  - `delta_do(action) = (do_helped-0.5) - mu_overcontrol*do_overcontrol`
+  - combined as `phi + dag_kappa*delta_do`.
+- Policy integration constraint: DAG re-ranking remains inside homeostat-feasible top-K options only.
+
 Recommended models:
 - Mixed-effects logistic for override acceptance (accepted ~ signature_count + burden + trigger + (1|person))
 - Mixed-effects survival/linear models for recovery-time deltas conditional on selection source
+- If `mode=dag`, include adjusted-policy indicator:
+  - `helped ~ dag_adjusted_selection + trigger + domain + (1|participant)`
+  - `burden ~ dag_adjusted_selection + trigger + domain + (1|participant)`
 
 ---
 
@@ -257,6 +287,12 @@ When drift/procrastination is detected, randomize among a small subset of candid
 
 **Crossover of neighbor genomes**  
 Rotate “one-gene mutations” across days/weeks to estimate main effects and key interactions.
+
+**Context-policy interventions (integrated)**
+- Randomize calendar-aware short-form routing near events vs standard routing.
+- Randomize energy-aware routing vs context-agnostic routing.
+- Randomize memory-decay settings to test staleness handling.
+- Evaluate user policy constraints (check caps/no-prompt windows) as enforced policy conditions.
 
 ### 8.3 Analyses
 - MRT proximal outcomes: **WCLS** or **GEE**, with moderators (trigger, RCQ scales)
@@ -281,6 +317,8 @@ Planner-only vs planner+regulator.
 - Progress rate (minutes/day; sessions/week)
 - Adherence (usage retention)
 - Burden/annoyance
+- Deadline miss risk calibration (hazard/risk-bin reliability)
+- Counterfactual planning accuracy (predicted vs realized slack/alarm under documented plan variants)
 
 ### 9.3 Secondary outcomes (user-level fitness alignment)
 - Satisfaction with progress
@@ -309,7 +347,7 @@ Missing data:
 Phenomenology-specific reporting in field evaluation:
 - report override rate and confidence-gated override rate
 - stratify outcomes by high-coverage vs sparse signatures
-- include ablation: policy layer only vs policy+phenomenology layer
+- include ablation: policy layer only vs policy+phenomenology vs policy+phenomenology(DAG)
 
 ---
 
@@ -323,6 +361,7 @@ Phenomenology-specific reporting in field evaluation:
 - Default genome values
 - Fitness DSL (base ranking rules)
 - CCA interface exists but is OFF
+- DAG structure defaults are explicit and user-configurable (`dag_adjust`, `dag_kappa`, smoothing/min-sample guards)
 
 ### Learnable via study
 - Expand/refine states/triggers (Phase 1–2.5)
@@ -334,6 +373,13 @@ Phenomenology-specific reporting in field evaluation:
 - Language pack λ refined for comprehension and burden reduction (Phase 1–4)
 - Signature map design (granularity/coarsening rules) to control sparsity while preserving actionable structure
 - Phenomenology thresholds (`n_min`, influence) tuned from empirical transfer-performance curves
+- Calendar-aware routing parameters and near-event policy switches
+- Energy/circadian-conditioned effectiveness maps
+- Task graph dependency effects on replanning performance
+- Deadline hazard model calibration and alarm-risk thresholds
+- User policy constraint defaults and tolerance profiles
+- Decision-trace schema sufficiency for audit/reproducibility
+- Memory staleness decay schedules and incremental update windows
 
 ---
 
@@ -358,6 +404,8 @@ In **v5**:
 Use the following interpretation frame:
 - **Physics:** the regulator supports transition from delayed potential to enacted work (timely activity).
 - **Categories:** operational variables are treated as structured predicates of task/domain/time/quality/relation (not a single scalar mood).
+
+### 12.1.1 Additional interpretation anchors
 - **Ethics:** target is an engaged practical mean (flow-capable), not maximal pressure.
 - **Politics:** user agency is preserved by local-first control, transparency, and right to pause/quit/retune language.
 

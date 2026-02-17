@@ -17,13 +17,17 @@ Companion example:
 - Course-correct events (n):
 - Phenomenology settings:
   - `enabled`:
-  - `mode` (`phi` or `fep`):
+  - `mode` (`phi` or `fep` or `dag`):
   - `min_samples (n_min)`:
   - `influence (tau)`:
   - `lambda_procrast`:
   - `mu_overcontrol`:
   - `beta_ambiguity`:
   - `eta_epistemic`:
+  - `dag_kappa`:
+  - `dag_adjust`:
+  - `dag_min_samples`:
+  - `dag_laplace`:
 
 ---
 
@@ -45,8 +49,8 @@ Interpretation note:
 ### B. Override behavior
 
 - Candidate decisions total:
-- Baseline-only selections (`selection_source=fitness`):
-- Phenomenology selections (`selection_source=fitness+phenomenology`):
+- Baseline-only selections (`selection_source in {fitness, homeostat+fitness}`):
+- Phenomenology selections (`selection_source includes phenomenology`):
 - Override rate = ___ / ___ = ___
 - Confidence-gated rejection count (recommended to log/derive):
 
@@ -80,7 +84,7 @@ Columns:
 ### Table T2: Action comparison by selection source
 
 Columns:
-- `selection_source` (`fitness` / `fitness+phenomenology`)
+- `selection_source` (`fitness` / `homeostat+fitness` / `fitness+phenomenology` / `homeostat+fitness+phenomenology`)
 - `events_n`
 - `helped_yes_n`
 - `helped_rated_n`
@@ -123,6 +127,7 @@ At minimum, report:
 Compare:
 1) Policy layer only (fitness DSL + goals)
 2) Policy + phenomenology layer
+3) Policy + phenomenology (DAG mode)
 
 Report:
 - Feasibility outcomes (slack violations)

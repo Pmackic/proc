@@ -15,6 +15,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 from collections import Counter, defaultdict
+import copy
 import argparse
 import datetime as dt
 import json
@@ -125,17 +126,32 @@ class WeeklyBlackout:
     start_hhmm: str
     end_hhmm: str
     label: str = ""
+    source: str = "manual"
+    uid: Optional[str] = None
 
 @dataclass
 class DateBlackout:
     date: str  # YYYY-MM-DD
     label: str = ""
+    source: str = "manual"
+    uid: Optional[str] = None
 
 @dataclass
 class DateRangeBlackout:
     start: str
     end: str
     label: str = ""
+    source: str = "manual"
+    uid: Optional[str] = None
+
+@dataclass
+class DateTimeBlackout:
+    date: str  # YYYY-MM-DD
+    start_hhmm: str
+    end_hhmm: str
+    label: str = ""
+    source: str = "manual"
+    uid: Optional[str] = None
 
 # ----------------------------
 # Discrete TMT + Haghbin
@@ -227,12 +243,55 @@ def default_phenomenology() -> Dict[str, Any]:
         "enabled": True,
         "min_samples": 3,
         "influence": 0.35,
-        "mode": "fep",  # phi|fep
+        "mode": "fep",  # phi|fep|dag
         "lambda_procrast": 0.60,
         "mu_overcontrol": 0.25,
         "beta_ambiguity": 0.20,
         "eta_epistemic": 0.10,
+        "dag_kappa": 0.30,
+        "dag_adjust": ["domain", "label", "trigger", "slack", "drift"],
+        "dag_min_samples": 5,
+        "dag_laplace": 1.0,
         "signatures": {},
+    }
+
+def default_homeostat_text() -> str:
+    return (
+        "require slack != neg\n"
+        "require recovery != slow\n"
+        "\n"
+        "penalty 2: annoyance = high\n"
+        "penalty 1: drift = high\n"
+        "penalty 1: progress = down\n"
+        "\n"
+        "prefer 1: slack in {ok, high}\n"
+        "prefer 1: recovery in {fast, instant}\n"
+        "prefer 1: stability in {steady, stable}\n"
+    )
+
+def default_nk_state() -> Dict[str, Any]:
+    neighbors = {
+        "g1": ["g2", "g3"],
+        "g2": ["g1", "g4"],
+        "g3": ["g1", "g5"],
+        "g4": ["g2", "g6"],
+        "g5": ["g3", "g7"],
+        "g6": ["g4", "g8"],
+        "g7": ["g5", "g9"],
+        "g8": ["g6", "g10"],
+        "g9": ["g7", "g10"],
+        "g10": ["g8", "g9"],
+    }
+    return {
+        "enabled": True,
+        "k": 2,
+        "neighbors": neighbors,
+        "main": {},
+        "pair": {},
+        "last_genotype": {},
+        "last_source": "none",
+        "last_pred_score": None,
+        "history": [],
     }
 
 # ----------------------------
@@ -569,6 +628,83 @@ def fitness_from_goal_profile(base: ProkFitProgram, goal: Dict[str, Any]) -> Pro
     return ProkFitProgram(req, pr)
 
 # ----------------------------
+# Homeostat DSL (require/penalty/prefer)
+# ----------------------------
+
+class HomeostatParseError(Exception):
+    pass
+
+@dataclass
+class WeightedExpr:
+    weight: int
+    expr: Expr
+
+@dataclass
+class HomeostatProgram:
+    requires: List[Expr]
+    penalties: List[WeightedExpr]
+    prefers: List[WeightedExpr]
+
+def parse_pred_expr(src: str) -> Expr:
+    toks = _tokenize(src.strip())
+    p = _Parser(toks)
+    expr = p.parse_expr()
+    if p.peek()[0] != "EOF":
+        raise HomeostatParseError(f"Unexpected token after expression: {p.peek()}")
+    return expr
+
+def parse_homeostat_text(src: str) -> HomeostatProgram:
+    requires: List[Expr] = []
+    penalties: List[WeightedExpr] = []
+    prefers: List[WeightedExpr] = []
+    for ln, raw in enumerate(src.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.fullmatch(r"require\s+(.+)", line, flags=re.IGNORECASE)
+        if m:
+            requires.append(parse_pred_expr(m.group(1)))
+            continue
+        m = re.fullmatch(r"penalty\s+(\d+)\s*:\s*(.+)", line, flags=re.IGNORECASE)
+        if m:
+            penalties.append(WeightedExpr(weight=max(0, int(m.group(1))), expr=parse_pred_expr(m.group(2))))
+            continue
+        m = re.fullmatch(r"prefer\s+(\d+)\s*:\s*(.+)", line, flags=re.IGNORECASE)
+        if m:
+            prefers.append(WeightedExpr(weight=max(0, int(m.group(1))), expr=parse_pred_expr(m.group(2))))
+            continue
+        raise HomeostatParseError(f"Invalid homeostat line {ln}: {raw}")
+    return HomeostatProgram(requires=requires, penalties=penalties, prefers=prefers)
+
+def parse_homeostat(path: Path) -> HomeostatProgram:
+    return parse_homeostat_text(path.read_text(encoding="utf-8"))
+
+def built_in_homeostat() -> HomeostatProgram:
+    return parse_homeostat_text(default_homeostat_text())
+
+def apply_homeostat(program: HomeostatProgram, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not candidates:
+        return []
+    passed: List[Dict[str, Any]] = []
+    for c in candidates:
+        ctx = c.get("ctx") or {}
+        if all(eval_expr(r, ctx) for r in program.requires):
+            passed.append(c)
+
+    active = passed if passed else candidates
+    out: List[Dict[str, Any]] = []
+    for c in active:
+        ctx = c.get("ctx") or {}
+        penalty_score = sum(w.weight for w in program.penalties if eval_expr(w.expr, ctx))
+        prefer_bonus = sum(w.weight for w in program.prefers if eval_expr(w.expr, ctx))
+        c2 = dict(c)
+        c2["homeostat_penalty"] = int(penalty_score)
+        c2["homeostat_bonus"] = int(prefer_bonus)
+        c2["homeostat_score"] = int(penalty_score - prefer_bonus)
+        out.append(c2)
+    return out
+
+# ----------------------------
 # CCA placeholder (OFF)
 # ----------------------------
 
@@ -616,6 +752,7 @@ class ProkState:
     weekly_blackouts: List[WeeklyBlackout] = None
     date_blackouts: List[DateBlackout] = None
     daterange_blackouts: List[DateRangeBlackout] = None
+    datetime_blackouts: List[DateTimeBlackout] = None
 
     # Habit/momentum
     today_min_done: bool = False
@@ -626,6 +763,8 @@ class ProkState:
     # Control layers
     genome: Dict[str, Any] = None
     fitness_path: Optional[str] = None
+    homeostat_path: Optional[str] = None
+    nk_state: Dict[str, Any] = None
 
     # Domain recursion
     domains: Dict[str, DomainState] = None
@@ -638,14 +777,27 @@ class ProkState:
     phenomenology: Dict[str, Any] = None
     use_cca: bool = False
     cca_model_path: Optional[str] = None
+    policy_constraints: Dict[str, Any] = None
 
 def _init_defaults(st: ProkState) -> None:
     if st.weekly_blackouts is None: st.weekly_blackouts = []
     if st.date_blackouts is None: st.date_blackouts = []
     if st.daterange_blackouts is None: st.daterange_blackouts = []
+    if st.datetime_blackouts is None: st.datetime_blackouts = []
     if st.tasks is None: st.tasks = []
     if st.genome is None: st.genome = default_genome()
     if "version" not in st.genome: st.genome = default_genome()
+    if st.nk_state is None: st.nk_state = default_nk_state()
+    if not isinstance(st.nk_state, dict): st.nk_state = default_nk_state()
+    if "neighbors" not in st.nk_state: st.nk_state["neighbors"] = default_nk_state()["neighbors"]
+    if "main" not in st.nk_state: st.nk_state["main"] = {}
+    if "pair" not in st.nk_state: st.nk_state["pair"] = {}
+    if "history" not in st.nk_state: st.nk_state["history"] = []
+    if "enabled" not in st.nk_state: st.nk_state["enabled"] = True
+    if "k" not in st.nk_state: st.nk_state["k"] = 2
+    if "last_genotype" not in st.nk_state: st.nk_state["last_genotype"] = {}
+    if "last_source" not in st.nk_state: st.nk_state["last_source"] = "none"
+    if "last_pred_score" not in st.nk_state: st.nk_state["last_pred_score"] = None
     if st.goal_profile is None: st.goal_profile = default_goal_profile()
     if st.language_pack is None: st.language_pack = dict(DEFAULT_LANG)
     if st.phenomenology is None: st.phenomenology = default_phenomenology()
@@ -655,15 +807,28 @@ def _init_defaults(st: ProkState) -> None:
     if "influence" not in st.phenomenology: st.phenomenology["influence"] = 0.35
     if "mode" not in st.phenomenology: st.phenomenology["mode"] = "fep"
     st.phenomenology["mode"] = str(st.phenomenology.get("mode") or "fep").lower()
-    if st.phenomenology["mode"] not in ("phi", "fep"):
+    if st.phenomenology["mode"] not in ("phi", "fep", "dag"):
         st.phenomenology["mode"] = "fep"
     if "lambda_procrast" not in st.phenomenology: st.phenomenology["lambda_procrast"] = 0.60
     if "mu_overcontrol" not in st.phenomenology: st.phenomenology["mu_overcontrol"] = 0.25
     if "beta_ambiguity" not in st.phenomenology: st.phenomenology["beta_ambiguity"] = 0.20
     if "eta_epistemic" not in st.phenomenology: st.phenomenology["eta_epistemic"] = 0.10
+    if "dag_kappa" not in st.phenomenology: st.phenomenology["dag_kappa"] = 0.30
+    if "dag_adjust" not in st.phenomenology: st.phenomenology["dag_adjust"] = ["domain", "label", "trigger", "slack", "drift"]
+    if "dag_min_samples" not in st.phenomenology: st.phenomenology["dag_min_samples"] = 5
+    if "dag_laplace" not in st.phenomenology: st.phenomenology["dag_laplace"] = 1.0
     if "signatures" not in st.phenomenology or not isinstance(st.phenomenology.get("signatures"), dict):
         st.phenomenology["signatures"] = {}
     if st.domains is None: st.domains = {}
+    if st.policy_constraints is None:
+        st.policy_constraints = {
+            "max_checks_per_hour": 10,
+            "quiet_windows": [],  # ["13:00-15:00", "21:00-22:00"]
+        }
+    if "max_checks_per_hour" not in st.policy_constraints:
+        st.policy_constraints["max_checks_per_hour"] = 10
+    if "quiet_windows" not in st.policy_constraints or not isinstance(st.policy_constraints.get("quiet_windows"), list):
+        st.policy_constraints["quiet_windows"] = []
 
     for t in st.tasks:
         if t.tmt_bins is None:
@@ -730,12 +895,15 @@ def load_state() -> ProkState:
         weekly_blackouts=[WeeklyBlackout(**x) for x in data.get("weekly_blackouts", [])],
         date_blackouts=[DateBlackout(**x) for x in data.get("date_blackouts", [])],
         daterange_blackouts=[DateRangeBlackout(**x) for x in data.get("daterange_blackouts", [])],
+        datetime_blackouts=[DateTimeBlackout(**x) for x in data.get("datetime_blackouts", [])],
         today_min_done=bool(data.get("today_min_done", False)),
         last_min_date=data.get("last_min_date"),
         streak=_to_int(data.get("streak"), 0),
         last_streak_date=data.get("last_streak_date"),
         genome=(data.get("genome") or None),
         fitness_path=data.get("fitness_path"),
+        homeostat_path=data.get("homeostat_path"),
+        nk_state=(data.get("nk_state") or None),
         domains=_load_domains(data),
         participant_id=_to_str(data.get("participant_id"), ""),
         study_mode=bool(data.get("study_mode", False)),
@@ -744,6 +912,7 @@ def load_state() -> ProkState:
         phenomenology=(data.get("phenomenology") or None),
         use_cca=bool(data.get("use_cca", False)),
         cca_model_path=data.get("cca_model_path"),
+        policy_constraints=(data.get("policy_constraints") or None),
     )
     _init_defaults(st)
 
@@ -914,10 +1083,124 @@ def _phenomenology_action_score(
         "p_overcontrol": p_overcontrol,
     }
 
+def _event_covariates_for_dag(ev: Dict[str, Any]) -> Dict[str, Any]:
+    ctx = dict(ev.get("homeostat_ctx") or {})
+    if "domain" not in ctx:
+        ctx["domain"] = str(ev.get("domain") or "unknown").lower()
+    if "label" not in ctx:
+        ctx["label"] = str(ev.get("label") or "UNKNOWN")
+    if "trigger" not in ctx:
+        ctx["trigger"] = str(ev.get("trigger") or "other")
+    return ctx
+
+def _dag_key(ctx: Dict[str, Any], adjust: List[str]) -> Tuple[str, ...]:
+    return tuple(str(ctx.get(k, "NA")) for k in adjust)
+
+def _safe_div(num: float, den: float) -> Optional[float]:
+    return (num / den) if den > 0 else None
+
+def _dag_adjusted_scores(
+    st: ProkState,
+    candidate_names: List[str],
+    current_ctx: Dict[str, Any],
+) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    ph = st.phenomenology or {}
+    adjust = [str(x) for x in (ph.get("dag_adjust") or ["domain", "label", "trigger", "slack", "drift"])]
+    dag_min = max(1, _to_int(ph.get("dag_min_samples"), 5))
+    laplace = max(0.0, _to_float(ph.get("dag_laplace"), 1.0))
+    acts = set(candidate_names)
+    notes: List[str] = []
+
+    records = _load_log_records(LOG_FILE)
+    events = [r for r in records if str(r.get("kind")) == "course_correct" and str(r.get("chosen") or "") in acts]
+    if not events:
+        notes.append("DAG fallback: no historical course_correct data for candidate actions.")
+        return {}, notes
+
+    # Localize to nearest context first (domain,label,trigger); fallback to all events.
+    d0 = str(current_ctx.get("domain") or "unknown").lower()
+    l0 = str(current_ctx.get("label") or "UNKNOWN")
+    t0 = str(current_ctx.get("trigger") or "other")
+    local = [
+        e for e in events
+        if str((e.get("domain") or "unknown")).lower() == d0
+        and str(e.get("label") or "UNKNOWN") == l0
+        and str(e.get("trigger") or "other") == t0
+    ]
+    pool = local if local else events
+    if not local:
+        notes.append("DAG fallback: no local (domain/label/trigger) data; using pooled historical data.")
+    if len(pool) < dag_min:
+        notes.append(f"DAG sparse-data: pool={len(pool)} < dag_min_samples={dag_min}; correction likely inactive.")
+
+    cell_n: Dict[Tuple[str, ...], int] = defaultdict(int)
+    cell_action_n: Dict[Tuple[str, ...], Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    universe = sorted(set(str(e.get("chosen") or "") for e in pool if e.get("chosen")))
+    if not universe:
+        notes.append("DAG fallback: no action labels in historical pool.")
+        return {}, notes
+    A = float(len(universe))
+
+    parsed: List[Tuple[Dict[str, Any], Tuple[str, ...], str]] = []
+    for e in pool:
+        a = str(e.get("chosen") or "")
+        if not a:
+            continue
+        cov = _event_covariates_for_dag(e)
+        key = _dag_key(cov, adjust)
+        parsed.append((e, key, a))
+        cell_n[key] += 1
+        cell_action_n[key][a] += 1
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for a in candidate_names:
+        w_help_num = 0.0
+        w_help_den = 0.0
+        w_bur_num = 0.0
+        w_bur_den = 0.0
+        n_help = 0
+        n_bur = 0
+        for e, key, ae in parsed:
+            if ae != a:
+                continue
+            nc = float(cell_n.get(key, 0))
+            nac = float((cell_action_n.get(key) or {}).get(a, 0))
+            p = (nac + laplace) / max(1e-9, (nc + laplace * A))
+            w = min(25.0, 1.0 / max(1e-6, p))
+            helped = e.get("helped")
+            if helped is not None:
+                y = 1.0 if bool(helped) else 0.0
+                w_help_num += w * y
+                w_help_den += w
+                n_help += 1
+            if isinstance(e.get("burden"), (int, float)):
+                b = float(e.get("burden"))
+                yb = 1.0 if b >= 4.0 else 0.0
+                w_bur_num += w * yb
+                w_bur_den += w
+                n_bur += 1
+
+        do_help = _safe_div(w_help_num, w_help_den)
+        do_over = _safe_div(w_bur_num, w_bur_den)
+        n_eff = min(n_help, n_bur) if (n_help and n_bur) else max(n_help, n_bur)
+        if n_eff < dag_min:
+            continue
+        out[a] = {
+            "do_helped": do_help,
+            "do_overcontrol": do_over,
+            "n": n_eff,
+            "pool_n": len(pool),
+            "local_pool": bool(local),
+        }
+    if not out:
+        notes.append("DAG fallback: no action reached minimum adjusted sample support.")
+    return out, notes
+
 def phenomenology_recommendation(
     st: ProkState,
     signature: str,
     candidate_names: List[str],
+    current_ctx: Optional[Dict[str, Any]] = None,
 ) -> Optional[Tuple[str, float, int, Dict[str, float]]]:
     ph = st.phenomenology or {}
     if not bool(ph.get("enabled", True)):
@@ -931,6 +1214,11 @@ def phenomenology_recommendation(
     entry = (ph.get("signatures") or {}).get(signature) or {}
     actions = entry.get("actions") or {}
     allowed = set(candidate_names)
+    dag_scores: Dict[str, Dict[str, Any]] = {}
+    dag_notes: List[str] = []
+    if mode == "dag":
+        dag_scores, dag_notes = _dag_adjusted_scores(st, candidate_names, current_ctx or {})
+    dag_kappa = _to_float(ph.get("dag_kappa"), 0.30)
 
     best_name = None
     best_score = -1e9
@@ -941,12 +1229,29 @@ def phenomenology_recommendation(
             continue
         score, rated, components = _phenomenology_action_score(
             stats,
-            mode=mode,
+            mode=("fep" if mode == "fep" else "phi"),
             lambda_procrast=lambda_procrast,
             mu_overcontrol=mu_overcontrol,
             beta_ambiguity=beta_ambiguity,
             eta_epistemic=eta_epistemic,
         )
+        if mode == "dag":
+            dag = dag_scores.get(name) or {}
+            do_help = dag.get("do_helped")
+            do_over = dag.get("do_overcontrol")
+            if do_help is not None or do_over is not None:
+                # Causal correction from backdoor-adjusted do-estimates.
+                causal = (0.0 if do_help is None else (float(do_help) - 0.5)) - float(mu_overcontrol) * (0.0 if do_over is None else float(do_over))
+                score = score + float(dag_kappa) * causal
+                components["dag_causal"] = causal
+                components["dag_do_helped"] = float(do_help) if do_help is not None else None
+                components["dag_do_overcontrol"] = float(do_over) if do_over is not None else None
+                components["dag_n"] = int(dag.get("n") or 0)
+                components["dag_pool_n"] = int(dag.get("pool_n") or 0)
+                components["dag_local_pool"] = 1.0 if dag.get("local_pool") else 0.0
+            components["mode"] = "dag"
+            if dag_notes:
+                components["dag_notes"] = list(dag_notes)
         if rated < min_samples:
             continue
         if score > best_score:
@@ -1133,7 +1438,14 @@ def build_phenom_audit_markdown(st: ProkState, records: List[Dict[str, Any]], lo
             t2[sel]["burden"].append(b)
             t3[(domain, trig, sel)]["burden"].append(b)
 
-    phenom_n = t2.get("fitness+phenomenology", {}).get("n", 0)
+    phenom_n = (
+        t2.get("fitness+phenomenology", {}).get("n", 0)
+        + t2.get("homeostat+fitness+phenomenology", {}).get("n", 0)
+    )
+    baseline_n = (
+        t2.get("fitness", {}).get("n", 0)
+        + t2.get("homeostat+fitness", {}).get("n", 0)
+    )
     override_rate = _safe_rate(phenom_n, n_events)
     notes = []
     if sig_field_present == 0:
@@ -1185,8 +1497,8 @@ def build_phenom_audit_markdown(st: ProkState, records: List[Dict[str, Any]], lo
     lines.append("### B) Override behavior")
     lines.append("")
     lines.append(f"- Candidate decisions total: `{n_events}`")
-    lines.append(f"- Baseline-only selections (`selection_source=fitness`): `{t2.get('fitness', {}).get('n', 0) if sel_field_present else 'N/A (legacy schema)'}`")
-    lines.append(f"- Phenomenology selections (`selection_source=fitness+phenomenology`): `{phenom_n}`")
+    lines.append(f"- Baseline-only selections (`selection_source in {{fitness,homeostat+fitness}}`): `{baseline_n if sel_field_present else 'N/A (legacy schema)'}`")
+    lines.append(f"- Phenomenology selections (`selection_source includes phenomenology`): `{phenom_n}`")
     lines.append(f"- Override rate: `{phenom_n} / {n_events} = {_fmt_num(override_rate)}`")
     lines.append("- Confidence-gated rejection count: `N/A`")
     lines.append("")
@@ -1292,6 +1604,49 @@ def _weekly_active(b: WeeklyBlackout, wd: int) -> bool:
         return b.weekday_start <= wd <= b.weekday_end
     return wd >= b.weekday_start or wd <= b.weekday_end
 
+def _merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    if not intervals:
+        return []
+    xs = sorted((a, b) for a, b in intervals if b > a)
+    out: List[Tuple[int, int]] = [xs[0]]
+    for a, b in xs[1:]:
+        la, lb = out[-1]
+        if a <= lb:
+            out[-1] = (la, max(lb, b))
+        else:
+            out.append((a, b))
+    return out
+
+def blocked_intervals_for_day(st: ProkState, d: dt.date) -> List[Tuple[int, int]]:
+    w0 = _parse_hhmm(st.day_start)
+    w1 = _parse_hhmm(st.day_end)
+    if w1 <= w0:
+        return []
+    intervals: List[Tuple[int, int]] = []
+
+    wd = d.weekday()
+    for b in st.weekly_blackouts:
+        if not _weekly_active(b, wd):
+            continue
+        s0 = _parse_hhmm(b.start_hhmm)
+        s1 = _parse_hhmm(b.end_hhmm)
+        if s1 <= s0:
+            intervals.append((w0, w1))
+        else:
+            intervals.append((max(w0, s0), min(w1, s1)))
+
+    ds = d.isoformat()
+    for b in st.datetime_blackouts:
+        if b.date != ds:
+            continue
+        s0 = _parse_hhmm(b.start_hhmm)
+        s1 = _parse_hhmm(b.end_hhmm)
+        if s1 <= s0:
+            continue
+        intervals.append((max(w0, s0), min(w1, s1)))
+
+    return _merge_intervals(intervals)
+
 def minutes_blocked_by_weekly(st: ProkState, d: dt.date) -> int:
     wd = d.weekday()
     blocked = 0
@@ -1306,6 +1661,9 @@ def minutes_blocked_by_weekly(st: ProkState, d: dt.date) -> int:
             blocked += (s1 - s0)
     return blocked
 
+def minutes_blocked_for_day(st: ProkState, d: dt.date) -> int:
+    return sum((b - a) for a, b in blocked_intervals_for_day(st, d))
+
 def day_capacity_blocks(st: ProkState, d: dt.date) -> int:
     if is_date_blackout(st, d):
         return 0
@@ -1314,7 +1672,7 @@ def day_capacity_blocks(st: ProkState, d: dt.date) -> int:
     if w1 <= w0:
         return 0
     workable = w1 - w0
-    blocked = minutes_blocked_by_weekly(st, d)
+    blocked = minutes_blocked_for_day(st, d)
     free = max(0, workable - blocked)
     blocks = free // max(1, st.plan_block_min)
     return int(min(blocks, max(0, st.max_blocks_per_day)))
@@ -1542,17 +1900,30 @@ def build_recovery_candidates(
     goal = st.goal_profile or default_goal_profile()
 
     def ctx_for(theta1: TMTBins, label1: str, gaps: Tuple[int,int]) -> Dict[str, Any]:
+        slack_blocks = task_slack_blocks(st, task)
+        ds = get_domain_state(st, task.domain)
+        recovery = _recovery_bin(label1, trigger, theta1)
+        drift_bin = _drift_bin(task.recent_drift_count)
+        annoy_bin = _annoyance_bin(gaps[0])
         return {
-            "slack": slack_band_from_blocks(task_slack_blocks(st, task)),
+            "slack": _slack_bin_homeostat(slack_blocks),
             "E": theta1.E, "V": theta1.V, "D": theta1.D, "G": theta1.G,
             "trigger": trigger,
             "procrastinating": (label1 == "PROCRASTINATION"),
             "intent_gap": (label1 == "PROCRASTINATION"),
             "expected_cost": True,
             "reward_near": (theta1.D == "N"),
-            "recover_fast": True,  # will be learned later from logs
+            "recover_fast": recovery in ("fast", "instant"),
             "checks": "many" if gaps[0] <= 3 else ("medium" if gaps[0] <= 6 else "few"),
             "annoying": (gaps[0] <= 2) and _goal_early_has(goal, "low_annoyance", tiers=3),
+            "annoyance": annoy_bin,
+            "drift": drift_bin,
+            "progress": _progress_bin(task),
+            "recovery": recovery,
+            "stability": _stability_bin(float(ds.drift_ema)),
+            "stability_num": float(ds.drift_ema),
+            "slack_blocks": int(slack_blocks),
+            "circadian": circadian_bin(),
         }
 
     candidates: List[Dict[str, Any]] = []
@@ -1607,6 +1978,79 @@ def build_recovery_candidates(
 
     return candidates
 
+def select_recovery_with_trace(
+    st: ProkState,
+    task: Task,
+    label: str,
+    trigger: str,
+    check_gaps: Tuple[int, int],
+    fitness_program: Optional[ProkFitProgram],
+    homeostat_program: Optional[HomeostatProgram],
+) -> Dict[str, Any]:
+    base_prog = fitness_program or load_fitness_program(st) or built_in_fitness()
+    prog = fitness_from_goal_profile(base_prog, st.goal_profile or default_goal_profile())
+    hprog = homeostat_program or load_homeostat_program(st) or built_in_homeostat()
+
+    candidates = build_recovery_candidates(st, task=task, label=label, trigger=trigger, check_gaps=check_gaps)
+    h_candidates = apply_homeostat(hprog, candidates)
+    fit_scored = rank_candidates_scored(prog, h_candidates)
+    fit_lex = {c["name"]: lex for lex, c in fit_scored}
+    ranked = sorted(
+        h_candidates,
+        key=lambda c: (int(c.get("homeostat_score", 0)), fit_lex.get(c.get("name"), tuple())),
+    )
+    if not ranked:
+        raise SystemExit("No admissible recovery candidates after homeostat/fitness filtering.")
+
+    best = ranked[0]
+    selection_source = "homeostat+fitness"
+    phenom_mode = str((st.phenomenology or {}).get("mode") or "fep").lower()
+    phenom_score: Optional[float] = None
+    phenom_components: Optional[Dict[str, float]] = None
+    shortlist = ranked[:3]
+
+    ctx0 = dict(shortlist[0].get("ctx") or {}) if shortlist else {}
+    ctx0["domain"] = task.domain
+    ctx0["label"] = label
+    ctx0["trigger"] = trigger
+    rec = phenomenology_recommendation(st, phenomenology_signature(task, label, trigger), [c["name"] for c in shortlist], current_ctx=ctx0)
+    if rec:
+        rec_name, rec_score, rec_n, rec_components = rec
+        phenom_score = rec_score
+        phenom_components = rec_components
+        influence = _to_float((st.phenomenology or {}).get("influence"), 0.35)
+        if rec_name != best["name"] and rec_score >= influence:
+            alt = next((c for c in shortlist if c["name"] == rec_name), None)
+            if alt is not None:
+                best = alt
+                selection_source = "homeostat+fitness+phenomenology"
+    elif phenom_mode == "dag":
+        _, dag_notes = _dag_adjusted_scores(st, [c["name"] for c in shortlist], ctx0)
+        if dag_notes:
+            phenom_components = {"mode": "dag", "dag_notes": dag_notes}
+
+    fit_rank_names = [c["name"] for _, c in fit_scored]
+    trace_rows = []
+    for c in ranked:
+        trace_rows.append({
+            "name": c.get("name"),
+            "homeostat_score": c.get("homeostat_score"),
+            "homeostat_penalty": c.get("homeostat_penalty"),
+            "homeostat_bonus": c.get("homeostat_bonus"),
+            "fitness_rank": (fit_rank_names.index(c.get("name")) + 1) if c.get("name") in fit_rank_names else None,
+            "ctx": c.get("ctx"),
+        })
+
+    return {
+        "best": best,
+        "selection_source": selection_source,
+        "phenom_mode": phenom_mode,
+        "phenom_score": phenom_score,
+        "phenom_components": phenom_components,
+        "shortlist": shortlist,
+        "trace_rows": trace_rows,
+    }
+
 def load_fitness_program(st: ProkState) -> Optional[ProkFitProgram]:
     if not st.fitness_path:
         return None
@@ -1618,6 +2062,270 @@ def load_fitness_program(st: ProkState) -> Optional[ProkFitProgram]:
     except Exception as e:
         print(f"Warning: failed to parse fitness DSL ({p}): {e}")
         return None
+
+def load_homeostat_program(st: ProkState) -> Optional[HomeostatProgram]:
+    if not st.homeostat_path:
+        return None
+    p = Path(st.homeostat_path)
+    if not p.exists():
+        return None
+    try:
+        return parse_homeostat(p)
+    except Exception as e:
+        print(f"Warning: failed to parse homeostat DSL ({p}): {e}")
+        return None
+
+def _slack_bin_homeostat(blocks: int) -> str:
+    if blocks < 0:
+        return "neg"
+    if blocks == 0:
+        return "low"
+    if blocks <= 2:
+        return "ok"
+    return "high"
+
+def _drift_bin(n: int) -> str:
+    if n >= 4:
+        return "high"
+    if n >= 2:
+        return "med"
+    if n >= 1:
+        return "low"
+    return "none"
+
+def _annoyance_bin(min_gap: int) -> str:
+    if min_gap <= 2:
+        return "high"
+    if min_gap <= 4:
+        return "med"
+    if min_gap <= 7:
+        return "low"
+    return "none"
+
+def _stability_bin(drift_ema: float) -> str:
+    if drift_ema >= 0.7:
+        return "fragile"
+    if drift_ema >= 0.4:
+        return "wobbly"
+    if drift_ema >= 0.2:
+        return "steady"
+    return "stable"
+
+def _progress_bin(task: Task) -> str:
+    if task.total_minutes <= 0:
+        return "flat"
+    done = max(0, task.total_minutes - task.remaining_minutes)
+    frac = float(done) / float(max(1, task.total_minutes))
+    if frac >= 0.8:
+        return "surge"
+    if frac >= 0.3:
+        return "up"
+    return "flat"
+
+def _recovery_bin(label: str, trigger: str, theta: TMTBins) -> str:
+    if label == "PROCRASTINATION" and (theta.D == "F" or theta.G == "H"):
+        return "slow"
+    if trigger in ("confusion", "anxiety") and theta.E == "L":
+        return "ok"
+    if theta.G == "L" and theta.D == "N":
+        return "fast"
+    return "ok"
+
+def _nk_gene_space() -> Dict[str, List[Any]]:
+    return {
+        "g1_profile": ["conservative", "balanced", "aggressive"],
+        "g2_profile": ["dense", "balanced", "sparse"],
+        "g3_tightening": ["none", "mild", "strong"],
+        "g4_classifier": ["lenient", "balanced", "strict"],
+        "g5_routing": ["E-first", "V-first", "trigger", "mixed"],
+        "g6_near_reward": [False, True],
+        "g7_artifact": ["none", "3problems", "5flashcards", "5bullets"],
+        "g8_replan_threshold": [0, 1, 2],
+        "g9_pause_policy": ["soft", "hard"],
+        "g10_explore": ["off", "low", "med", "high"],
+    }
+
+def _preset_g1(name: str) -> Dict[str, int]:
+    presets = {
+        "conservative": {"L,L,F,H": 10, "L,M,F,H": 10, "M,M,F,H": 25, "H,M,F,H": 25, "M,H,N,L": 35},
+        "balanced": {"L,L,F,H": 10, "L,M,F,H": 10, "M,M,F,H": 25, "H,M,F,H": 25, "M,H,N,L": 50},
+        "aggressive": {"L,L,F,H": 25, "L,M,F,H": 25, "M,M,F,H": 35, "H,M,F,H": 50, "M,H,N,L": 50},
+    }
+    return presets.get(name, presets["balanced"])
+
+def _preset_g2(name: str) -> Dict[str, List[int]]:
+    presets = {
+        "dense": {"L,L,F,H": [2, 5], "L,M,F,H": [2, 5], "M,M,F,H": [4, 8], "M,M,N,L": [4, 8], "H,H,N,L": [6, 14]},
+        "balanced": {"L,L,F,H": [2, 5], "L,M,F,H": [2, 5], "M,M,F,H": [4, 8], "M,M,N,L": [6, 14], "H,H,N,L": [8, 16]},
+        "sparse": {"L,L,F,H": [4, 8], "L,M,F,H": [4, 8], "M,M,F,H": [6, 14], "M,M,N,L": [8, 16], "H,H,N,L": [10, 20]},
+    }
+    return presets.get(name, presets["balanced"])
+
+def _genotype_from_genome(genome: Dict[str, Any]) -> Dict[str, Any]:
+    g = genome or default_genome()
+    gp = {
+        "g1_profile": "balanced",
+        "g2_profile": "balanced",
+        "g3_tightening": str(g.get("g3_tightening") or "mild"),
+        "g4_classifier": str(g.get("g4_classifier") or "balanced"),
+        "g5_routing": str(g.get("g5_recovery_routing") or "trigger"),
+        "g6_near_reward": bool(g.get("g6_enforce_near_reward", True)),
+        "g7_artifact": str(g.get("g7_artifact") or "5bullets"),
+        "g8_replan_threshold": _to_int(g.get("g8_replan_threshold"), 1),
+        "g9_pause_policy": str(g.get("g9_pause_policy") or "soft"),
+        "g10_explore": str(g.get("g10_explore") or "off"),
+    }
+    for k in ("conservative", "balanced", "aggressive"):
+        if (g.get("g1_block_map") or {}) == _preset_g1(k):
+            gp["g1_profile"] = k
+            break
+    for k in ("dense", "balanced", "sparse"):
+        if (g.get("g2_check_map") or {}) == _preset_g2(k):
+            gp["g2_profile"] = k
+            break
+    return gp
+
+def _genome_from_genotype(genotype: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any]:
+    out = copy.deepcopy(base or default_genome())
+    out["g1_block_map"] = _preset_g1(str(genotype.get("g1_profile") or "balanced"))
+    out["g2_check_map"] = _preset_g2(str(genotype.get("g2_profile") or "balanced"))
+    out["g3_tightening"] = str(genotype.get("g3_tightening") or out.get("g3_tightening") or "mild")
+    out["g4_classifier"] = str(genotype.get("g4_classifier") or out.get("g4_classifier") or "balanced")
+    out["g5_recovery_routing"] = str(genotype.get("g5_routing") or out.get("g5_recovery_routing") or "trigger")
+    out["g6_enforce_near_reward"] = bool(genotype.get("g6_near_reward", out.get("g6_enforce_near_reward", True)))
+    out["g7_artifact"] = str(genotype.get("g7_artifact") or out.get("g7_artifact") or "5bullets")
+    out["g8_replan_threshold"] = _to_int(genotype.get("g8_replan_threshold"), _to_int(out.get("g8_replan_threshold"), 1))
+    out["g9_pause_policy"] = str(genotype.get("g9_pause_policy") or out.get("g9_pause_policy") or "soft")
+    out["g10_explore"] = str(genotype.get("g10_explore") or out.get("g10_explore") or "off")
+    return out
+
+def _nk_mutation_neighbors(genotype: Dict[str, Any]) -> List[Dict[str, Any]]:
+    space = _nk_gene_space()
+    out: List[Dict[str, Any]] = []
+    for gk, alleles in space.items():
+        cur = genotype.get(gk)
+        vals = list(alleles)
+        if cur not in vals:
+            vals.append(cur)
+        for a in vals:
+            if a == cur:
+                continue
+            ng = dict(genotype)
+            ng[gk] = a
+            out.append(ng)
+    return out
+
+def _nk_pair_key(a: str, b: str) -> str:
+    return "|".join(sorted([a, b]))
+
+def _nk_pair_val(ga: str, va: Any, gb: str, vb: Any) -> str:
+    if ga <= gb:
+        return f"{va}|{vb}"
+    return f"{vb}|{va}"
+
+def _nk_estimate(st: ProkState, genotype: Dict[str, Any]) -> float:
+    nk = st.nk_state or default_nk_state()
+    main = nk.get("main") or {}
+    pair = nk.get("pair") or {}
+    neighbors = nk.get("neighbors") or default_nk_state()["neighbors"]
+    genes = list(_nk_gene_space().keys())
+
+    terms: List[float] = []
+    for gi in genes:
+        vi = genotype.get(gi)
+        mstat = ((main.get(gi) or {}).get(str(vi)) or {})
+        mmean = _safe_rate(_to_int(mstat.get("sum"), 0), _to_int(mstat.get("n"), 0))
+        if mmean is None:
+            mmean = 0.0
+        pvals: List[float] = []
+        for gj in neighbors.get(gi, [])[:2]:
+            vj = genotype.get(gj)
+            pk = _nk_pair_key(gi, gj)
+            pv = _nk_pair_val(gi, vi, gj, vj)
+            pstat = ((pair.get(pk) or {}).get(pv) or {})
+            pmean = _safe_rate(_to_int(pstat.get("sum"), 0), _to_int(pstat.get("n"), 0))
+            if pmean is not None:
+                pvals.append(pmean)
+        pair_mean = _safe_avg(pvals) if pvals else 0.0
+        terms.append(0.7 * mmean + 0.3 * pair_mean)
+    return _safe_avg(terms) or 0.0
+
+def nk_select_genome(st: ProkState) -> None:
+    nk = st.nk_state or default_nk_state()
+    if not bool(nk.get("enabled", True)):
+        nk["last_source"] = "disabled"
+        st.nk_state = nk
+        return
+    base_geno = _genotype_from_genome(st.genome)
+    candidates = [base_geno] + _nk_mutation_neighbors(base_geno)
+    scored = [(g, _nk_estimate(st, g)) for g in candidates]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    explore = str(st.genome.get("g10_explore") or "off").lower()
+    eps = {"off": 0.0, "low": 0.10, "med": 0.20, "high": 0.35}.get(explore, 0.0)
+    if len(scored) > 1 and random.random() < eps:
+        chosen = random.choice(scored[1:])[0]
+        source = "explore"
+    else:
+        chosen = scored[0][0]
+        source = "exploit"
+    st.genome = _genome_from_genotype(chosen, st.genome)
+    nk["last_genotype"] = chosen
+    nk["last_source"] = source
+    nk["last_pred_score"] = round(_nk_estimate(st, chosen), 4)
+    st.nk_state = nk
+
+def nk_record_outcome(
+    st: ProkState,
+    planned_minutes: int,
+    minutes_worked: int,
+    drift_events: int,
+    check_count: int,
+    quit_early: bool,
+    task: Task,
+) -> None:
+    nk = st.nk_state or default_nk_state()
+    geno = nk.get("last_genotype") or _genotype_from_genome(st.genome)
+    main = nk.setdefault("main", {})
+    pair = nk.setdefault("pair", {})
+    neighbors = nk.get("neighbors") or default_nk_state()["neighbors"]
+    genes = list(_nk_gene_space().keys())
+
+    feasible = 1.0 if (task.deadline is None or task_slack_blocks(st, task) >= 0) else 0.0
+    progress = float(minutes_worked) / float(max(1, planned_minutes))
+    disturbance = min(1.0, float(drift_events) / 4.0)
+    checks = min(1.0, float(check_count) / 10.0)
+    quit_pen = 1.0 if quit_early else 0.0
+    utility = 1.0 * feasible + 0.8 * progress - 0.5 * disturbance - 0.2 * checks - 0.8 * quit_pen
+    u_int = int(round(utility * 100))
+
+    for gk in genes:
+        gv = str(geno.get(gk))
+        gstat = (main.setdefault(gk, {})).setdefault(gv, {"sum": 0, "n": 0})
+        gstat["sum"] = _to_int(gstat.get("sum"), 0) + u_int
+        gstat["n"] = _to_int(gstat.get("n"), 0) + 1
+
+    for gk in genes:
+        for gj in neighbors.get(gk, [])[:2]:
+            if gk >= gj:
+                continue
+            pk = _nk_pair_key(gk, gj)
+            pv = _nk_pair_val(gk, geno.get(gk), gj, geno.get(gj))
+            pstat = (pair.setdefault(pk, {})).setdefault(pv, {"sum": 0, "n": 0})
+            pstat["sum"] = _to_int(pstat.get("sum"), 0) + u_int
+            pstat["n"] = _to_int(pstat.get("n"), 0) + 1
+
+    hist = nk.setdefault("history", [])
+    hist.append({
+        "ts": _now_iso(),
+        "utility": round(utility, 4),
+        "u_int": u_int,
+        "genotype": geno,
+        "source": nk.get("last_source") or "unknown",
+    })
+    if len(hist) > 200:
+        nk["history"] = hist[-200:]
+    st.nk_state = nk
 
 # ----------------------------
 # Session runner (checkclock + immediate report)
@@ -1660,6 +2368,7 @@ def run_session(
     ask_trigger_on: str,
     ask_haghbin_on_p: bool,
     fitness_program: Optional[ProkFitProgram],
+    homeostat_program: Optional[HomeostatProgram],
 ) -> None:
     ensure_today(st)
     _init_defaults(st)
@@ -1695,6 +2404,20 @@ def run_session(
 
     session_id = f"{_now_iso()}_{random.randint(1000,9999)}"
     check_count = 0
+    check_timestamps: List[float] = []
+
+    def can_fire_check() -> Tuple[bool, str]:
+        if in_quiet_window(st):
+            return False, "quiet_window"
+        max_per_hour = _to_int((st.policy_constraints or {}).get("max_checks_per_hour"), 10)
+        if max_per_hour <= 0:
+            return False, "max_checks_per_hour=0"
+        now = time.time()
+        recent = [t for t in check_timestamps if now - t <= 3600.0]
+        check_timestamps[:] = recent
+        if len(recent) >= max_per_hour:
+            return False, "max_checks_per_hour"
+        return True, "ok"
 
     _log_event("session_start", {
         "participant_id": st.participant_id,
@@ -1710,6 +2433,9 @@ def run_session(
         "slack": task_slack_blocks(st, task),
         "goal_profile": st.goal_profile,
         "genome": st.genome,
+        "nk_source": (st.nk_state or {}).get("last_source"),
+        "nk_pred_score": (st.nk_state or {}).get("last_pred_score"),
+        "nk_genotype": (st.nk_state or {}).get("last_genotype"),
         "use_cca": st.use_cca,
     })
 
@@ -1744,6 +2470,11 @@ def run_session(
             })
 
     def ask_state_check() -> str:
+        ok, why = can_fire_check()
+        if not ok:
+            print(f"\nCHECK skipped by policy constraint ({why}).")
+            return ""
+        check_timestamps.append(time.time())
         print(f"\n{lang_get(lang, 'prompt.check', 'CHECK')}: [e=engaged, d=drifting, p=procrastinating, b=blocked]")
         return input("> ").strip().lower()[:1]
 
@@ -1783,39 +2514,43 @@ def run_session(
 
         task.tmt_bins = update_tmt_bins(task.tmt_bins, label, trigger, recovery_type=None)
         signature = phenomenology_signature(task, label, trigger)
+        sel = select_recovery_with_trace(
+            st=st,
+            task=task,
+            label=label,
+            trigger=trigger,
+            check_gaps=(min_gap, max_gap),
+            fitness_program=fitness_program,
+            homeostat_program=homeostat_program,
+        )
+        best = sel["best"]
+        selection_source = sel["selection_source"]
+        phenom_mode = sel["phenom_mode"]
+        phenom_score = sel["phenom_score"]
+        phenom_components = sel["phenom_components"]
+        baseline_name = ((sel.get("trace_rows") or [{}])[0]).get("name")
+        reason_codes: List[str] = ["homeostat_rank", "fitness_rank"]
+        if selection_source.endswith("+phenomenology"):
+            reason_codes.append("phenomenology_override")
+        if phenom_mode == "dag":
+            reason_codes.append("dag_mode")
 
-        base_prog = fitness_program or load_fitness_program(st) or built_in_fitness()
-        prog = fitness_from_goal_profile(base_prog, st.goal_profile or default_goal_profile())
-
-        candidates = build_recovery_candidates(st, task=task, label=label, trigger=trigger, check_gaps=(min_gap, max_gap))
-        ranked = rank_candidates_scored(prog, candidates)
-        best = ranked[0][1]
-        selection_source = "fitness"
-        phenom_mode = str((st.phenomenology or {}).get("mode") or "fep").lower()
-        phenom_score: Optional[float] = None
-        phenom_components: Optional[Dict[str, float]] = None
-
-        shortlist = [c for _, c in ranked[:3]]
-        rec = phenomenology_recommendation(st, signature, [c["name"] for c in shortlist])
-        if rec:
-            rec_name, rec_score, rec_n, rec_components = rec
-            phenom_score = rec_score
-            phenom_components = rec_components
-            influence = _to_float((st.phenomenology or {}).get("influence"), 0.35)
-            if rec_name != best["name"] and rec_score >= influence:
-                alt = next((c for c in shortlist if c["name"] == rec_name), None)
-                if alt is not None:
-                    best = alt
-                    selection_source = "fitness+phenomenology"
-                    print(
-                        f"Phenomenology match: using {rec_name} "
-                        f"(mode={phenom_mode}, score={rec_score:.2f}, n={rec_n}, "
-                        f"phi={rec_components.get('phi', 0.0):.2f}, "
-                        f"amb={rec_components.get('ambiguity', 0.0):.2f}, epi={rec_components.get('epistemic', 0.0):.2f}, "
-                        f"v={rec_components.get('p_viable', 0.0):.2f}, "
-                        f"p={rec_components.get('p_procrast', 0.0):.2f}, "
-                        f"o={rec_components.get('p_overcontrol', 0.0):.2f})."
-                    )
+        if selection_source == "homeostat+fitness+phenomenology":
+            print(
+                f"Phenomenology match: using {best['name']} "
+                f"(mode={phenom_mode}, score={_to_float(phenom_score, 0.0):.2f}, "
+                f"phi={_to_float((phenom_components or {}).get('phi'), 0.0):.2f}, "
+                f"amb={_to_float((phenom_components or {}).get('ambiguity'), 0.0):.2f}, "
+                f"epi={_to_float((phenom_components or {}).get('epistemic'), 0.0):.2f}, "
+                f"v={_to_float((phenom_components or {}).get('p_viable'), 0.0):.2f}, "
+                f"p={_to_float((phenom_components or {}).get('p_procrast'), 0.0):.2f}, "
+                f"o={_to_float((phenom_components or {}).get('p_overcontrol'), 0.0):.2f}, "
+                f"dag={_to_float((phenom_components or {}).get('dag_causal'), 0.0):.2f})."
+            )
+        dag_notes = (phenom_components or {}).get("dag_notes") if isinstance(phenom_components, dict) else None
+        if dag_notes:
+            for note in dag_notes[:2]:
+                print(f"DAG note: {note}")
 
         task.tmt_bins = best["theta_next"]
         if random_checks:
@@ -1852,7 +2587,14 @@ def run_session(
             "theta": asdict(task.tmt_bins),
             "chosen": best["name"],
             "selection_source": selection_source,
+            "decision_reason_codes": reason_codes,
+            "decision_trace": sel.get("trace_rows"),
+            "decision_baseline": baseline_name,
             "phenomenology_signature": signature,
+            "homeostat_score": best.get("homeostat_score"),
+            "homeostat_penalty": best.get("homeostat_penalty"),
+            "homeostat_bonus": best.get("homeostat_bonus"),
+            "homeostat_ctx": best.get("ctx"),
             "phenom_mode": phenom_mode,
             "phenom_score": phenom_score,
             "phenom_components": phenom_components,
@@ -2010,6 +2752,15 @@ def run_session(
             })
             print(f"Logged {mm} min. Remaining minutes: {task.remaining_minutes}")
 
+    nk_record_outcome(
+        st=st,
+        planned_minutes=block_minutes,
+        minutes_worked=minutes_worked,
+        drift_events=drift_events,
+        check_count=check_count,
+        quit_early=quit_early,
+        task=task,
+    )
     save_state(st)
 
 # ----------------------------
@@ -2129,21 +2880,256 @@ def _parse_weekday_range(s: str) -> Tuple[int,int]:
     a,b = s.split("-",1)
     return _weekday_idx(a), _weekday_idx(b)
 
+def circadian_bin(now: Optional[dt.datetime] = None) -> str:
+    x = now or dt.datetime.now()
+    h = x.hour
+    if 5 <= h < 11:
+        return "morning"
+    if 11 <= h < 17:
+        return "afternoon"
+    if 17 <= h < 22:
+        return "evening"
+    return "night"
+
+def _parse_window(s: str) -> Tuple[int, int]:
+    m = re.fullmatch(r"\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*", s or "")
+    if not m:
+        raise ValueError(f"Invalid window '{s}'. Use HH:MM-HH:MM")
+    a = _parse_hhmm(m.group(1))
+    b = _parse_hhmm(m.group(2))
+    return a, b
+
+def in_quiet_window(st: ProkState, now: Optional[dt.datetime] = None) -> bool:
+    x = now or dt.datetime.now()
+    mnow = x.hour * 60 + x.minute
+    for raw in (st.policy_constraints or {}).get("quiet_windows") or []:
+        try:
+            a, b = _parse_window(str(raw))
+        except Exception:
+            continue
+        if a <= b:
+            if a <= mnow <= b:
+                return True
+        else:
+            if mnow >= a or mnow <= b:
+                return True
+    return False
+
+def deadline_risk(st: ProkState, task: Task) -> Tuple[float, str, List[str]]:
+    if not task.deadline:
+        return 0.0, "none", []
+    slack = task_slack_blocks(st, task)
+    reasons: List[str] = []
+    score = 0.0
+    if slack < 0:
+        score += 2.0; reasons.append("negative_slack")
+    elif slack == 0:
+        score += 1.2; reasons.append("zero_slack")
+    elif slack <= 2:
+        score += 0.8; reasons.append("low_slack")
+    if task.recent_drift_count >= 3:
+        score += 0.8; reasons.append("drift_cluster")
+    elif task.recent_drift_count >= 1:
+        score += 0.3; reasons.append("recent_drift")
+    try:
+        days_left = max(0, (dt.date.fromisoformat(task.deadline) - _today()).days)
+    except Exception:
+        days_left = 0
+    if days_left <= 3 and task.remaining_minutes > 0:
+        score += 0.7; reasons.append("deadline_near")
+    p = 1.0 / (1.0 + math.exp(-(score - 1.0)))
+    if p >= 0.67:
+        band = "high"
+    elif p >= 0.34:
+        band = "med"
+    else:
+        band = "low"
+    return p, band, reasons
+
+def _ics_unfold_lines(text: str) -> List[str]:
+    out: List[str] = []
+    for raw in text.splitlines():
+        if not out:
+            out.append(raw.rstrip("\r"))
+            continue
+        if raw.startswith(" ") or raw.startswith("\t"):
+            out[-1] += raw[1:].rstrip("\r")
+        else:
+            out.append(raw.rstrip("\r"))
+    return out
+
+def _ics_parse_value(raw: str) -> Tuple[Optional[dt.datetime], Optional[dt.date], bool]:
+    s = raw.strip()
+    if re.fullmatch(r"\d{8}", s):
+        d = dt.datetime.strptime(s, "%Y%m%d").date()
+        return None, d, True
+    if re.fullmatch(r"\d{8}T\d{6}Z?", s):
+        z = s.endswith("Z")
+        core = s[:-1] if z else s
+        x = dt.datetime.strptime(core, "%Y%m%dT%H%M%S")
+        return x, None, False
+    if re.fullmatch(r"\d{8}T\d{4}Z?", s):
+        z = s.endswith("Z")
+        core = s[:-1] if z else s
+        x = dt.datetime.strptime(core, "%Y%m%dT%H%M")
+        return x, None, False
+    return None, None, False
+
+def _ics_event_map(lines: List[str]) -> Dict[str, Tuple[Dict[str, str], str]]:
+    out: Dict[str, Tuple[Dict[str, str], str]] = {}
+    for ln in lines:
+        if ":" not in ln:
+            continue
+        k, v = ln.split(":", 1)
+        parts = k.split(";")
+        name = parts[0].strip().upper()
+        params: Dict[str, str] = {}
+        for p0 in parts[1:]:
+            if "=" in p0:
+                a, b = p0.split("=", 1)
+                params[a.strip().upper()] = b.strip()
+        out[name] = (params, v.strip())
+    return out
+
+def _rrule_days(rrule: str) -> List[int]:
+    parts = {}
+    for x in str(rrule).split(";"):
+        if "=" in x:
+            a, b = x.split("=", 1)
+            parts[a.strip().upper()] = b.strip().upper()
+    byday = parts.get("BYDAY")
+    if not byday:
+        return []
+    m = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
+    out = []
+    for d in byday.split(","):
+        d = d.strip()
+        if d in m:
+            out.append(m[d])
+    return out
+
+def parse_ics_to_blackouts(path: Path) -> Dict[str, List[Any]]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = _ics_unfold_lines(text)
+    events: List[List[str]] = []
+    cur: Optional[List[str]] = None
+    for ln in lines:
+        u = ln.strip().upper()
+        if u == "BEGIN:VEVENT":
+            cur = []
+            continue
+        if u == "END:VEVENT":
+            if cur is not None:
+                events.append(cur)
+            cur = None
+            continue
+        if cur is not None:
+            cur.append(ln)
+
+    out_weekly: List[WeeklyBlackout] = []
+    out_date: List[DateBlackout] = []
+    out_range: List[DateRangeBlackout] = []
+    out_dt: List[DateTimeBlackout] = []
+
+    for ev in events:
+        mp = _ics_event_map(ev)
+        uid = (mp.get("UID", ({}, ""))[1] or "").strip() or f"ics-{random.randint(10000,99999)}"
+        summary = (mp.get("SUMMARY", ({}, ""))[1] or "").strip() or "calendar"
+        label = f"calendar:{summary}"
+
+        ds = mp.get("DTSTART")
+        de = mp.get("DTEND")
+        if not ds:
+            continue
+        ds_params, ds_val = ds
+        de_params, de_val = de if de else ({}, "")
+        ds_dt, ds_date, ds_all = _ics_parse_value(ds_val)
+        de_dt, de_date, de_all = _ics_parse_value(de_val) if de_val else (None, None, False)
+        if ds_dt is None and ds_date is None:
+            continue
+
+        rrule = (mp.get("RRULE", ({}, ""))[1] or "").strip()
+        is_weekly = ("FREQ=WEEKLY" in rrule.upper()) if rrule else False
+
+        if is_weekly and ds_dt is not None:
+            days = _rrule_days(rrule)
+            if not days:
+                days = [ds_dt.weekday()]
+            end_dt = de_dt or (ds_dt + dt.timedelta(hours=1))
+            s = ds_dt.strftime("%H:%M")
+            e = end_dt.strftime("%H:%M")
+            for wd in days:
+                out_weekly.append(WeeklyBlackout(
+                    weekday_start=wd,
+                    weekday_end=wd,
+                    start_hhmm=s,
+                    end_hhmm=e,
+                    label=label,
+                    source="calendar",
+                    uid=uid,
+                ))
+            continue
+
+        if ds_all or (ds_params.get("VALUE", "").upper() == "DATE"):
+            sdate = ds_date or (ds_dt.date() if ds_dt else None)
+            if sdate is None:
+                continue
+            # iCal all-day DTEND is usually exclusive.
+            if de_date:
+                edate = de_date - dt.timedelta(days=1)
+            else:
+                edate = sdate
+            if edate <= sdate:
+                out_date.append(DateBlackout(date=sdate.isoformat(), label=label, source="calendar", uid=uid))
+            else:
+                out_range.append(DateRangeBlackout(start=sdate.isoformat(), end=edate.isoformat(), label=label, source="calendar", uid=uid))
+            continue
+
+        sdt = ds_dt or dt.datetime.combine(ds_date, dt.time(0, 0))
+        edt = de_dt or (sdt + dt.timedelta(hours=1))
+        if edt.date() != sdt.date():
+            out_date.append(DateBlackout(date=sdt.date().isoformat(), label=label, source="calendar", uid=uid))
+            continue
+        out_dt.append(DateTimeBlackout(
+            date=sdt.date().isoformat(),
+            start_hhmm=sdt.strftime("%H:%M"),
+            end_hhmm=edt.strftime("%H:%M"),
+            label=label,
+            source="calendar",
+            uid=uid,
+        ))
+
+    return {
+        "weekly": out_weekly,
+        "date": out_date,
+        "range": out_range,
+        "datetime": out_dt,
+    }
+
+def _drop_calendar_blackouts(st: ProkState) -> None:
+    st.weekly_blackouts = [b for b in st.weekly_blackouts if str(getattr(b, "source", "manual")) != "calendar"]
+    st.date_blackouts = [b for b in st.date_blackouts if str(getattr(b, "source", "manual")) != "calendar"]
+    st.daterange_blackouts = [b for b in st.daterange_blackouts if str(getattr(b, "source", "manual")) != "calendar"]
+    st.datetime_blackouts = [b for b in st.datetime_blackouts if str(getattr(b, "source", "manual")) != "calendar"]
+
 def cmd_blackout(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
     if args.action == "list":
         print("Weekly blackouts:")
         for b in st.weekly_blackouts:
-            print(f"  {b.weekday_start}-{b.weekday_end} {b.start_hhmm}-{b.end_hhmm} {b.label}".strip())
+            print(f"  {b.weekday_start}-{b.weekday_end} {b.start_hhmm}-{b.end_hhmm} {b.label} [{b.source}]".strip())
         print("Date blackouts:")
         for b in st.date_blackouts:
-            print(f"  {b.date} {b.label}".strip())
+            print(f"  {b.date} {b.label} [{b.source}]".strip())
         print("Date-range blackouts:")
         for b in st.daterange_blackouts:
-            print(f"  {b.start}..{b.end} {b.label}".strip())
+            print(f"  {b.start}..{b.end} {b.label} [{b.source}]".strip())
+        print("Date-time blackouts:")
+        for b in st.datetime_blackouts:
+            print(f"  {b.date} {b.start_hhmm}-{b.end_hhmm} {b.label} [{b.source}]".strip())
         return
     if args.action == "clear":
-        st.weekly_blackouts = []; st.date_blackouts = []; st.daterange_blackouts = []
+        st.weekly_blackouts = []; st.date_blackouts = []; st.daterange_blackouts = []; st.datetime_blackouts = []
         save_state(st); _log_event("blackout_clear", {"participant_id": st.participant_id})
         print("Cleared all blackouts.")
         return
@@ -2173,6 +3159,56 @@ def cmd_blackout(args) -> None:
             print("Added date-range blackout.")
             return
         raise SystemExit("blackout add requires --weekday or --date or --daterange")
+
+def cmd_calendar(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    if args.action == "import":
+        p = Path(args.ics)
+        if not p.exists():
+            raise SystemExit(f"ICS file not found: {p}")
+        parsed = parse_ics_to_blackouts(p)
+        if args.replace_all:
+            st.weekly_blackouts = []
+            st.date_blackouts = []
+            st.daterange_blackouts = []
+            st.datetime_blackouts = []
+        else:
+            _drop_calendar_blackouts(st)
+        st.weekly_blackouts.extend(parsed["weekly"])
+        st.date_blackouts.extend(parsed["date"])
+        st.daterange_blackouts.extend(parsed["range"])
+        st.datetime_blackouts.extend(parsed["datetime"])
+        save_state(st)
+        _log_event("calendar_import", {
+            "participant_id": st.participant_id,
+            "path": str(p),
+            "weekly_n": len(parsed["weekly"]),
+            "date_n": len(parsed["date"]),
+            "range_n": len(parsed["range"]),
+            "datetime_n": len(parsed["datetime"]),
+            "replace_all": bool(args.replace_all),
+        })
+        print(
+            "Imported calendar blackouts from "
+            f"{p}: weekly={len(parsed['weekly'])}, date={len(parsed['date'])}, "
+            f"range={len(parsed['range'])}, datetime={len(parsed['datetime'])}"
+        )
+        return
+    if args.action == "show":
+        wk = [b for b in st.weekly_blackouts if b.source == "calendar"]
+        dd = [b for b in st.date_blackouts if b.source == "calendar"]
+        rr = [b for b in st.daterange_blackouts if b.source == "calendar"]
+        dtb = [b for b in st.datetime_blackouts if b.source == "calendar"]
+        print(f"Calendar blackouts: weekly={len(wk)} date={len(dd)} range={len(rr)} datetime={len(dtb)}")
+        for b in dtb[:10]:
+            print(f"  {b.date} {b.start_hhmm}-{b.end_hhmm} {b.label}")
+        return
+    if args.action == "clear":
+        _drop_calendar_blackouts(st)
+        save_state(st)
+        _log_event("calendar_clear", {"participant_id": st.participant_id})
+        print("Cleared imported calendar blackouts.")
+        return
 
 def cmd_today(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
@@ -2205,7 +3241,12 @@ def cmd_today(args) -> None:
         for tid, blocks in today_plan.items():
             t = get_task_by_id(st, tid)
             name = t.name if t else tid
+            risk_txt = "-"
+            if t and t.deadline:
+                rp, rb, _ = deadline_risk(st, t)
+                risk_txt = f"{rb}({_fmt_num(rp)})"
             print(f"  {tid} | {name} | {blocks}")
+            print(f"    risk: {risk_txt}")
 
     # Suggested run
     suggested = None
@@ -2223,6 +3264,9 @@ def cmd_run(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
     if args.fitness:
         st.fitness_path = args.fitness
+    if args.homeostat:
+        st.homeostat_path = args.homeostat
+    nk_select_genome(st)
     task = select_active_task(st, args.task, args.domain, args.name)
     save_state(st)
 
@@ -2235,6 +3279,7 @@ def cmd_run(args) -> None:
         mx = _to_int(args.max_gap, 14) if args.max_gap is not None else 14
 
     program = load_fitness_program(st) if st.fitness_path else None
+    hprogram = load_homeostat_program(st) if st.homeostat_path else None
 
     run_session(
         st=st,
@@ -2246,7 +3291,53 @@ def cmd_run(args) -> None:
         ask_trigger_on=args.ask_trigger,
         ask_haghbin_on_p=not args.no_haghbin,
         fitness_program=program,
+        homeostat_program=hprogram,
     )
+
+def cmd_debug(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    if args.action != "decision":
+        raise SystemExit("Unknown debug action.")
+    task = select_active_task(st, args.task, args.domain, args.name)
+    label = str(args.label or ("PROCRASTINATION" if args.kind == "p" else "DRIFT")).upper()
+    if label not in ("DRIFT", "PROCRASTINATION", "BLOCKED"):
+        raise SystemExit("label must be one of DRIFT|PROCRASTINATION|BLOCKED")
+    trigger = str(args.trigger or "other")
+    fit = load_fitness_program(st) if st.fitness_path else None
+    homeo = load_homeostat_program(st) if st.homeostat_path else None
+    mn = _to_int(args.min_gap, 6)
+    mx = _to_int(args.max_gap, 14)
+    if mx < mn:
+        mx = mn
+    sel = select_recovery_with_trace(
+        st=st,
+        task=task,
+        label=label,
+        trigger=trigger,
+        check_gaps=(mn, mx),
+        fitness_program=fit,
+        homeostat_program=homeo,
+    )
+    print(f"DEBUG decision | task={task.id} | label={label} | trigger={trigger}")
+    print(f"selection_source={sel['selection_source']} | chosen={sel['best']['name']} | phenom_mode={sel['phenom_mode']}")
+    pcs = sel.get("phenom_components") or {}
+    if pcs:
+        print(
+            f"phenom: phi={_to_float(pcs.get('phi'), 0.0):.2f} "
+            f"amb={_to_float(pcs.get('ambiguity'), 0.0):.2f} "
+            f"epi={_to_float(pcs.get('epistemic'), 0.0):.2f} "
+            f"dag={_to_float(pcs.get('dag_causal'), 0.0):.2f}"
+        )
+        notes = pcs.get("dag_notes") or []
+        for n in notes[:3]:
+            print(f"dag_note: {n}")
+    print("candidates:")
+    for i, row in enumerate(sel.get("trace_rows") or [], 1):
+        print(
+            f"  {i}. {row.get('name')} | homeostat={row.get('homeostat_score')} "
+            f"(p={row.get('homeostat_penalty')},b={row.get('homeostat_bonus')}) "
+            f"| fitness_rank={row.get('fitness_rank')}"
+        )
 
 def cmd_log(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
@@ -2286,13 +3377,29 @@ def cmd_status(args) -> None:
     for t in st.tasks:
         slack = task_slack_blocks(st, t) if t.deadline else None
         slack_txt = str(slack) if slack is not None else "-"
+        risk_txt = "-"
+        if t.deadline:
+            rp, rb, _ = deadline_risk(st, t)
+            risk_txt = f"{rb}({_fmt_num(rp)})"
         active = "*" if st.active_task_id == t.id else " "
-        print(f"   {active} {t.id} | {t.domain} | {t.name} | deadline={t.deadline or '-'} | remaining={t.remaining_minutes}/{t.total_minutes} | slack={slack_txt} | drift={t.recent_drift_count} | θ={asdict(t.tmt_bins)}")
+        print(f"   {active} {t.id} | {t.domain} | {t.name} | deadline={t.deadline or '-'} | remaining={t.remaining_minutes}/{t.total_minutes} | slack={slack_txt} | risk={risk_txt} | drift={t.recent_drift_count} | θ={asdict(t.tmt_bins)}")
     print(f"  genome.explore: {st.genome.get('g10_explore')}")
+    print(f"  fitness_path: {st.fitness_path or '(none)'}")
+    print(f"  homeostat_path: {st.homeostat_path or '(none)'}")
     print(f"  goal_profile: {st.goal_profile}")
     ph = st.phenomenology or {}
     print(f"  phenomenology: enabled={bool(ph.get('enabled', True))} | signatures={len((ph.get('signatures') or {}))} | min_samples={_to_int(ph.get('min_samples'), 3)} | influence={_to_float(ph.get('influence'), 0.35):.2f}")
     print(f"  use_cca: {st.use_cca} (v4 placeholder, not used)")
+    nk = st.nk_state or {}
+    hist = nk.get("history") or []
+    print(
+        "  nk: "
+        f"enabled={bool(nk.get('enabled', True))} "
+        f"k={_to_int(nk.get('k'), 2)} "
+        f"source={nk.get('last_source') or 'none'} "
+        f"pred={nk.get('last_pred_score')} "
+        f"history={len(hist)}"
+    )
     print(f"  state file: {STATE_FILE.resolve()}")
     print(f"  log file: {LOG_FILE.resolve()}")
 
@@ -2325,6 +3432,58 @@ def cmd_config(args) -> None:
             st.max_blocks_per_day = args.max_blocks_per_day
         save_state(st)
         print("Config updated.")
+
+def cmd_policy(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    if args.action == "show":
+        print(_json_dump(st.policy_constraints or {}))
+        return
+    if args.action == "set":
+        pc = dict(st.policy_constraints or {})
+        if args.max_checks_per_hour is not None:
+            pc["max_checks_per_hour"] = max(0, _to_int(args.max_checks_per_hour, _to_int(pc.get("max_checks_per_hour"), 10)))
+        if args.quiet_add:
+            arr = list(pc.get("quiet_windows") or [])
+            for w in args.quiet_add:
+                _ = _parse_window(w)
+                arr.append(w.strip())
+            pc["quiet_windows"] = arr
+        if args.quiet_clear:
+            pc["quiet_windows"] = []
+        st.policy_constraints = pc
+        save_state(st)
+        print("Policy constraints updated.")
+        return
+
+def cmd_simulate(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    mm = max(0, _to_int(args.minutes_today, 0))
+    target = args.task
+    if target and not get_task_by_id(st, target):
+        raise SystemExit(f"Task not found: {target}")
+    rows = []
+    for t in st.tasks:
+        if not t.deadline:
+            continue
+        cur_slack = task_slack_blocks(st, t)
+        rem2 = max(0, t.remaining_minutes - (mm if (target is None or t.id == target) else 0))
+        need2 = int(math.ceil(max(0, rem2) / max(1, st.plan_block_min)))
+        cap2 = task_capacity_blocks(st, t)
+        slack2 = cap2 - need2
+        p0, b0, _ = deadline_risk(st, t)
+        t2 = Task(
+            id=t.id, domain=t.domain, name=t.name, deadline=t.deadline,
+            total_minutes=t.total_minutes, remaining_minutes=rem2,
+            tmt_bins=t.tmt_bins, recent_drift_count=t.recent_drift_count,
+        )
+        p1, b1, _ = deadline_risk(st, t2)
+        rows.append((t.id, t.name, cur_slack, slack2, p0, b0, p1, b1))
+    print(f"COUNTERFACTUAL: log {mm} minute(s) today " + (f"to task={target}" if target else "across all tasks with deadlines"))
+    for r in rows:
+        print(
+            f"{r[0]} | {r[1]} | slack {r[2]} -> {r[3]} | "
+            f"risk {r[5]}({_fmt_num(r[4])}) -> {r[7]}({_fmt_num(r[6])})"
+        )
 def cmd_genome(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
     if args.action == "show":
@@ -2363,6 +3522,56 @@ def cmd_fitness(args) -> None:
         st.fitness_path = str(p)
         save_state(st)
         print(f"Set fitness DSL: {p}"); return
+
+def cmd_homeostat(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    if args.action == "show":
+        print(st.homeostat_path or "(none)")
+        return
+    if args.action == "write-default":
+        out = Path(args.out or "homeostat.default.prokfit")
+        out.write_text(default_homeostat_text(), encoding="utf-8")
+        print(f"Wrote default homeostat file to {out}")
+        return
+    if args.action == "set":
+        p = Path(args.path)
+        _ = parse_homeostat(p)
+        st.homeostat_path = str(p)
+        save_state(st)
+        print(f"Set homeostat DSL: {p}")
+        return
+
+def cmd_nk(args) -> None:
+    st = load_state(); ensure_today(st); _init_defaults(st)
+    nk = st.nk_state or default_nk_state()
+    if args.action == "show":
+        history = nk.get("history") or []
+        recent = history[-20:]
+        utils = [float(h.get("utility")) for h in recent if isinstance(h.get("utility"), (int, float))]
+        print(_json_dump({
+            "enabled": bool(nk.get("enabled", True)),
+            "k": _to_int(nk.get("k"), 2),
+            "last_source": nk.get("last_source"),
+            "last_pred_score": nk.get("last_pred_score"),
+            "history_n": len(history),
+            "recent_utility_avg": _safe_avg(utils),
+            "last_genotype": nk.get("last_genotype") or {},
+        }))
+        return
+    if args.action == "set":
+        if args.enabled is not None:
+            nk["enabled"] = (str(args.enabled).lower() == "on")
+        if args.k is not None:
+            nk["k"] = max(0, min(4, _to_int(args.k, _to_int(nk.get("k"), 2))))
+        st.nk_state = nk
+        save_state(st)
+        print("NK settings updated.")
+        return
+    if args.action == "reset":
+        st.nk_state = default_nk_state()
+        save_state(st)
+        print("NK memory reset.")
+        return
 
 def cmd_study(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
@@ -2458,6 +3667,10 @@ def cmd_phenom(args) -> None:
             "mu_overcontrol": _to_float(ph.get("mu_overcontrol"), 0.25),
             "beta_ambiguity": _to_float(ph.get("beta_ambiguity"), 0.20),
             "eta_epistemic": _to_float(ph.get("eta_epistemic"), 0.10),
+            "dag_kappa": _to_float(ph.get("dag_kappa"), 0.30),
+            "dag_adjust": [str(x) for x in (ph.get("dag_adjust") or [])],
+            "dag_min_samples": _to_int(ph.get("dag_min_samples"), 5),
+            "dag_laplace": _to_float(ph.get("dag_laplace"), 1.0),
             "signatures": len(sigs),
         }))
         if not sigs:
@@ -2510,7 +3723,7 @@ def cmd_phenom(args) -> None:
             ph["enabled"] = (str(args.enabled).lower() == "on")
         if args.mode is not None:
             md = str(args.mode).lower()
-            if md in ("phi", "fep"):
+            if md in ("phi", "fep", "dag"):
                 ph["mode"] = md
         if args.min_samples is not None:
             ph["min_samples"] = max(1, _to_int(args.min_samples, _to_int(ph.get("min_samples"), 3)))
@@ -2524,6 +3737,16 @@ def cmd_phenom(args) -> None:
             ph["beta_ambiguity"] = max(0.0, min(2.0, _to_float(args.beta_ambiguity, _to_float(ph.get("beta_ambiguity"), 0.20))))
         if args.eta_epistemic is not None:
             ph["eta_epistemic"] = max(0.0, min(2.0, _to_float(args.eta_epistemic, _to_float(ph.get("eta_epistemic"), 0.10))))
+        if args.dag_kappa is not None:
+            ph["dag_kappa"] = max(0.0, min(2.0, _to_float(args.dag_kappa, _to_float(ph.get("dag_kappa"), 0.30))))
+        if args.dag_min_samples is not None:
+            ph["dag_min_samples"] = max(1, _to_int(args.dag_min_samples, _to_int(ph.get("dag_min_samples"), 5)))
+        if args.dag_laplace is not None:
+            ph["dag_laplace"] = max(0.0, min(10.0, _to_float(args.dag_laplace, _to_float(ph.get("dag_laplace"), 1.0))))
+        if args.dag_adjust is not None:
+            raw = [x.strip() for x in str(args.dag_adjust).split(",") if x.strip()]
+            if raw:
+                ph["dag_adjust"] = raw
         st.phenomenology = ph
         save_state(st)
         print("Phenomenology settings updated.")
@@ -2539,6 +3762,10 @@ def cmd_phenom(args) -> None:
             "mu_overcontrol": max(0.0, min(2.0, _to_float(ph.get("mu_overcontrol"), 0.25))),
             "beta_ambiguity": max(0.0, min(2.0, _to_float(ph.get("beta_ambiguity"), 0.20))),
             "eta_epistemic": max(0.0, min(2.0, _to_float(ph.get("eta_epistemic"), 0.10))),
+            "dag_kappa": max(0.0, min(2.0, _to_float(ph.get("dag_kappa"), 0.30))),
+            "dag_adjust": [str(x) for x in (ph.get("dag_adjust") or ["domain", "label", "trigger", "slack", "drift"])],
+            "dag_min_samples": max(1, _to_int(ph.get("dag_min_samples"), 5)),
+            "dag_laplace": max(0.0, min(10.0, _to_float(ph.get("dag_laplace"), 1.0))),
             "signatures": {},
         }
         st.phenomenology = keep
@@ -2721,6 +3948,15 @@ def build_parser() -> argparse.ArgumentParser:
     sb_list = sbsub.add_parser("list"); sb_list.set_defaults(func=cmd_blackout)
     sb_clear = sbsub.add_parser("clear"); sb_clear.set_defaults(func=cmd_blackout)
 
+    scal = sub.add_parser("calendar")
+    scalsub = scal.add_subparsers(dest="action", required=True)
+    scal_import = scalsub.add_parser("import")
+    scal_import.add_argument("--ics", required=True, help="Path to .ics calendar export")
+    scal_import.add_argument("--replace-all", action="store_true", help="Replace all existing blackouts (manual + calendar)")
+    scal_import.set_defaults(func=cmd_calendar)
+    scalsub.add_parser("show").set_defaults(func=cmd_calendar)
+    scalsub.add_parser("clear").set_defaults(func=cmd_calendar)
+
     stoday = sub.add_parser("today"); stoday.set_defaults(func=cmd_today)
 
     sr = sub.add_parser("run")
@@ -2734,7 +3970,21 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("--ask-trigger", choices=["never","p","dp","always"], default="dp")
     sr.add_argument("--no-haghbin", action="store_true")
     sr.add_argument("--fitness", default=None)
+    sr.add_argument("--homeostat", default=None)
     sr.set_defaults(func=cmd_run)
+
+    sdbg = sub.add_parser("debug")
+    sdbg_sub = sdbg.add_subparsers(dest="action", required=True)
+    sdec = sdbg_sub.add_parser("decision")
+    sdec.add_argument("--task", default=None)
+    sdec.add_argument("--domain", default=None)
+    sdec.add_argument("--name", default=None)
+    sdec.add_argument("--kind", choices=["d", "p"], default="d")
+    sdec.add_argument("--label", default=None, help="DRIFT|PROCRASTINATION|BLOCKED (optional)")
+    sdec.add_argument("--trigger", default="other")
+    sdec.add_argument("--min-gap", type=int, default=6)
+    sdec.add_argument("--max-gap", type=int, default=14)
+    sdec.set_defaults(func=cmd_debug)
 
     slog = sub.add_parser("log")
     slog.add_argument("--task", default=None)
@@ -2757,6 +4007,20 @@ def build_parser() -> argparse.ArgumentParser:
     scfg_set.add_argument("--max-blocks-per-day", type=int, default=None)
     scfg_set.set_defaults(func=cmd_config)
 
+    spol = sub.add_parser("policy")
+    spolsub = spol.add_subparsers(dest="action", required=True)
+    spolsub.add_parser("show").set_defaults(func=cmd_policy)
+    spol_set = spolsub.add_parser("set")
+    spol_set.add_argument("--max-checks-per-hour", type=int, default=None)
+    spol_set.add_argument("--quiet-add", action="append", default=None, help="Add quiet window HH:MM-HH:MM (repeatable)")
+    spol_set.add_argument("--quiet-clear", action="store_true")
+    spol_set.set_defaults(func=cmd_policy)
+
+    ssim = sub.add_parser("simulate")
+    ssim.add_argument("--minutes-today", type=int, required=True)
+    ssim.add_argument("--task", default=None, help="Optional task_id; if omitted applies minutes to all deadline tasks")
+    ssim.set_defaults(func=cmd_simulate)
+
     sg = sub.add_parser("genome")
     sgsub = sg.add_subparsers(dest="action", required=True)
     sgsub.add_parser("show").set_defaults(func=cmd_genome)
@@ -2768,6 +4032,21 @@ def build_parser() -> argparse.ArgumentParser:
     sfsub.add_parser("show").set_defaults(func=cmd_fitness)
     sf_wd = sfsub.add_parser("write-default"); sf_wd.add_argument("--out", default=None); sf_wd.set_defaults(func=cmd_fitness)
     sf_set = sfsub.add_parser("set"); sf_set.add_argument("path"); sf_set.set_defaults(func=cmd_fitness)
+
+    sh = sub.add_parser("homeostat")
+    shsub = sh.add_subparsers(dest="action", required=True)
+    shsub.add_parser("show").set_defaults(func=cmd_homeostat)
+    sh_wd = shsub.add_parser("write-default"); sh_wd.add_argument("--out", default=None); sh_wd.set_defaults(func=cmd_homeostat)
+    sh_set = shsub.add_parser("set"); sh_set.add_argument("path"); sh_set.set_defaults(func=cmd_homeostat)
+
+    snk = sub.add_parser("nk")
+    snksub = snk.add_subparsers(dest="action", required=True)
+    snksub.add_parser("show").set_defaults(func=cmd_nk)
+    snk_set = snksub.add_parser("set")
+    snk_set.add_argument("--enabled", choices=["on", "off"], default=None)
+    snk_set.add_argument("--k", type=int, default=None)
+    snk_set.set_defaults(func=cmd_nk)
+    snksub.add_parser("reset").set_defaults(func=cmd_nk)
 
     sstudy = sub.add_parser("study")
     sst = sstudy.add_subparsers(dest="action", required=True)
@@ -2800,13 +4079,17 @@ def build_parser() -> argparse.ArgumentParser:
     sph_audit.set_defaults(func=cmd_phenom)
     sph_set = sph2.add_parser("set")
     sph_set.add_argument("--enabled", choices=["on", "off"], default=None)
-    sph_set.add_argument("--mode", choices=["phi", "fep"], default=None)
+    sph_set.add_argument("--mode", choices=["phi", "fep", "dag"], default=None)
     sph_set.add_argument("--min-samples", type=int, default=None)
     sph_set.add_argument("--influence", type=float, default=None)
     sph_set.add_argument("--lambda-procrast", type=float, default=None)
     sph_set.add_argument("--mu-overcontrol", type=float, default=None)
     sph_set.add_argument("--beta-ambiguity", type=float, default=None)
     sph_set.add_argument("--eta-epistemic", type=float, default=None)
+    sph_set.add_argument("--dag-kappa", type=float, default=None)
+    sph_set.add_argument("--dag-adjust", default=None, help="comma-separated covariates for DAG adjustment")
+    sph_set.add_argument("--dag-min-samples", type=int, default=None)
+    sph_set.add_argument("--dag-laplace", type=float, default=None)
     sph_set.set_defaults(func=cmd_phenom)
 
     sexp = sub.add_parser("export")
