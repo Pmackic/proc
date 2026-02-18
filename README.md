@@ -8,6 +8,7 @@ What’s new in v5:
 - **Algedonic alarm** (`ok | warning | critical`) that flags structural infeasibility and recommends fixes
 - **Homeostat engine** (`require/penalty/prefer`) that safety-filters and scores recovery candidates
 - **NK slow loop** that adapts genome choices across sessions from outcome feedback
+- **Ashby compliance hooks**: essential-variable guard, requisite-variety check, and ultrastable step mechanism
 
 Python stdlib only. Target: Python 3.10+.
 
@@ -115,6 +116,7 @@ Type a single letter **then press Enter**:
 Notes:
 - If the program is asking a question (e.g., a check prompt), it will wait for your reply.
 - Random checks pop up when enabled; answer `e/d/p/b`.
+- If essential variables are threatened (critical slack/drift boundary), runtime can trigger an **ULTRASTABLE STEP** that mutates NK+homeostat parameters for the next run.
 
 ### `log`
 Log minutes directly to the active task or a specific task.
@@ -204,6 +206,10 @@ python prok_v5.py forecast show --days 14 --top 10
 python prok_v5.py constitution check
 python prok_v5.py close day
 ```
+
+`constitution check` now includes Ashby diagnostics:
+- `requisite_variety` (disturbance classes vs response classes from logs)
+- `essential_variables` (critical boundary violations)
 
 ---
 

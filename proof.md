@@ -94,6 +94,7 @@ Concrete varieties:
 - `A`: recovery family × check-gap policy × block sizing (from genome bins).
 
 Implemented routing order (runtime):
+0) NK selects/tunes joint policy parameters (machine + bounded homeostat multipliers)
 1) homeostat filter/score (`require`, `penalty`, `prefer`)
 2) fitness + goal-profile ranking
 3) phenomenology re-ranking inside top-K (evidence-gated)
@@ -255,6 +256,24 @@ Design implication:
 - phenomenological memory does not require expanding the global action alphabet,
 - but increases discrimination of the observation-to-action map by conditioning on learned invariant classes.
 
+## 10.2 Lemma (Execution Authorization as Gated Composition)
+
+Define three runtime gates for observation class `u`:
+- safety gate: `A_H(u)` (homeostat-admissible actions),
+- policy gate: `A_K(u) \subseteq A_H(u)` (policy-approved top-K under S5 doctrine),
+- memory gate: `fM(u) \in A_K(u)` (phenomenology may refine only inside policy-approved set).
+
+Then execution authorization is equivalent to membership in the composed gate:
+
+```
+a_exec(u) is authorized  iff  a_exec(u) \in A_K(u) \subseteq A_H(u).
+```
+
+Hence:
+- no action can execute without passing safety constraints,
+- S5 policy doctrine is a real authorization layer (not post-hoc explanation),
+- phenomenology can improve selection but cannot bypass safety/policy gates.
+
 ---
 
 ## 11. Homologija (Model–Observation)
@@ -341,7 +360,7 @@ Interpretation:
 This is exactly why PROK v5 now combines:
 - hard `require` rules for safety,
 - soft `penalty/prefer` scoring (instead of only hard constraints),
-- NK tuning over genome knobs to recover useful variety inside the safe envelope.
+- NK tuning over machine + homeostat knobs to recover useful variety inside the safe envelope.
 
 ## 13. Lemma (NK Slow-Loop Capacity Growth, Empirical)
 
@@ -357,6 +376,24 @@ Practical implication:
 - the NK loop does not replace Ashby/homeostat constraints,
 - it improves controller adaptation *within* safe admissible space,
 - and therefore increases effective control quality without removing safety vetoes.
+
+Runtime note:
+- `g` is a joint genotype (machine genes + bounded homeostat multipliers),
+- structural homeostat `require` constraints remain fixed constitutional invariants.
+
+## 13.1 Lemma (Ultrastable Step Mechanism)
+
+Let `E_t` be the essential-variable set (feasibility/drift boundary). If `E_t` exits the admissible region, runtime triggers a bounded random mutation over the joint genotype and resumes control:
+
+```
+if E_t \notin admissible:
+    g_{t+1} <- mutate_neighbor(g_t)
+    control resumes under homeostat constraints
+```
+
+Hence adaptation is two-stage:
+- empirical NK adaptation during nominal operation,
+- step-change mutation when essential variables violate bounds (Ashby ultrastability).
 
 ## 14. Lemma (Backdoor-Adjusted Refinement in DAG Mode)
 
@@ -381,13 +418,13 @@ Because re-ranking is still constrained to homeostat-feasible top-K candidates, 
 
 ## 15. Lemma (Safety-Preserving Structural Transfer)
 
-Let `A_H(u)` be the homeostat-feasible action set for observation class `u`, and `A_K(u) subseteq A_H(u)` the top-K baseline-ranked candidates.
+Let `A_H(u)` be the homeostat-feasible action set for observation class `u`, and `A_K(u) \subseteq A_H(u)` the top-K baseline-ranked candidates.
 Let `f0(u)` be baseline choice and `fM(u)` the phenomenology-refined choice.
 
 By construction in PROK v5:
 
 ```
-fM(u) in A_K(u) subseteq A_H(u)
+fM(u) \in A_K(u) \subseteq A_H(u)
 ```
 
 Therefore:
@@ -449,6 +486,7 @@ Failure signatures map directly to VSM loci:
 
 Hence the mapping is not only descriptive, but operationally falsifiable.
 
+### 16.5 Composed Homology Map (Observation to Action)
 with `W_eff = h(W)` the effective phenomenological space of observed disturbances.
 The regulator acts on `U` through:
 
@@ -460,30 +498,63 @@ The composed map `f ∘ h` is the operational homology between the model's distu
 
 ---
 
-## 12. Sailor Metaphor (Operational Interpretation)
+## 17. Sailor Metaphor (Operational Interpretation)
 
-To make the control architecture concrete:
+```text
+SHIP CREW (Diagram)
+────────────────────────────────────────────────────────────────────
+[Storm hits]
+     |
+     v
+[Lookout names the trouble]
+     |
+     v
+[Quartermaster: no thrashing]
+     |
+     +----------------------+
+     |                      |
+     v                      v
+[Duty Officer: today]   [Route Officer: long path]
+     \                      /
+      \                    /
+       +------>[Crew proposes moves]------+
+                                           |
+                                           v
+                    [Safety Officer: hard safety checks]
+                    - no dangerous move
+                    - no too-slow urgent response
+                                           |
+                                           v
+             [Policy Steward (S5): mission values + doctrine]
+                                           |
+                                           v
+                         [First Mate ranks safe moves]
+                                           |
+                                           v
+              [Old Sailor checks journal, refines safely]
+                                           |
+                                           v
+                              [Captain authorizes execution]
+                                           |
+                                           v
+                                   [Crew executes move]
+                                           |
+                                           v
+                                       [Write to log]
+                                           |
+                                           v
+       [Chief Engineer tunes setup + preference strengths over voyages]
+                                           |
+                                           v
+                    [Emergency reset if limits are crossed]
+```
 
-- **Navigator (control core)** monitors feasibility/slack and redraws route when needed.
-- **First Mate (policy layer)** chooses baseline maneuvers from explicit ship rules (fitness DSL + goals).
-- **Old Sailor (phenomenology layer)** consults the logbook of similar wind/current signatures and may switch to a better maneuver only when evidence is sufficient and only within approved top maneuvers.
-
-Interaction cycle:
-1) disturbance is observed,  
-2) Navigator checks whether ports are still reachable,  
-3) First Mate ranks standard responses,  
-4) Old Sailor optionally refines choice under evidence gates,  
-5) crew executes,  
-6) outcome is logged for future signatures.
-
-Meaning in proof terms:
-- safety envelope is preserved because refinement is constrained to admissible candidates,
-- adaptation improves through local empirical memory,
-- Ashby's variety condition remains the governing feasibility constraint.
+Story:
+A storm hits. The lookout names the kind of trouble. The crew gets to work. The Quartermaster keeps the crew from wasting time by jumping between jobs every minute. The Duty Officer decides what must be done today with the hours you actually have. The Route Officer checks the longer path and asks if the ship still arrives on time. The crew proposes moves. The Safety Officer applies hard checks and removes unsafe moves. The Policy Steward (S5) applies mission values and doctrine. The First Mate ranks the safe moves. Then the Old Sailor checks the journal of similar storms and may suggest a better safe move; forbidden moves remain forbidden. The Captain authorizes execution. The crew executes and writes what happened in the log. Over many voyages, the Chief Engineer tunes setup and preference strengths. If danger limits are crossed, they do an emergency reset and continue.
 
 ---
 
-## 13. Aristotelian Ethical Clarification (Unequal Mean)
+## 18. Aristotelian Ethical Clarification (Unequal Mean)
 
 We model three regulation bands:
 - `P`: procrastinative delay band (deficiency of timely action),
@@ -520,7 +591,7 @@ This formalizes a procrastination-focused but non-coercive center:
 
 ---
 
-## 14. Algedonic–Demon–Autopoietic Coupling
+## 19. Algedonic-Demon-Autopoietic Coupling
 
 Define:
 - `A_t in {ok, warning, critical}` as the algedonic channel,

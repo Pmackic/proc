@@ -269,6 +269,26 @@ def default_homeostat_text() -> str:
         "prefer 1: stability in {steady, stable}\n"
     )
 
+def default_homeostat_params() -> Dict[str, float]:
+    # Tunable homeostat weights: NK can adapt these while requires remain structural.
+    return {
+        "penalty_scale": 1.0,
+        "prefer_scale": 1.0,
+        "annoyance_penalty_mult": 1.0,
+        "drift_penalty_mult": 1.0,
+        "progress_down_penalty_mult": 1.0,
+        "slack_prefer_mult": 1.0,
+        "recovery_prefer_mult": 1.0,
+        "stability_prefer_mult": 1.0,
+    }
+
+def _normalize_homeostat_params(v: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    out = dict(default_homeostat_params())
+    raw = v or {}
+    for k, dv in out.items():
+        out[k] = max(0.2, min(3.0, _to_float(raw.get(k), dv)))
+    return out
+
 def default_nk_state() -> Dict[str, Any]:
     neighbors = {
         "g1": ["g2", "g3"],
@@ -682,9 +702,25 @@ def parse_homeostat(path: Path) -> HomeostatProgram:
 def built_in_homeostat() -> HomeostatProgram:
     return parse_homeostat_text(default_homeostat_text())
 
-def apply_homeostat(program: HomeostatProgram, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _expr_is_pred(expr: Expr, name: str, op: str, val: Any) -> bool:
+    if expr.kind != "pred":
+        return False
+    en, eo, ev = expr.value
+    if str(en) != str(name) or str(eo) != str(op):
+        return False
+    if op == "in":
+        vals = set(str(x) for x in (ev or []))
+        return set(str(x) for x in (val or [])) == vals
+    return str(ev) == str(val)
+
+def apply_homeostat(
+    program: HomeostatProgram,
+    candidates: List[Dict[str, Any]],
+    params: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     if not candidates:
         return []
+    hp = _normalize_homeostat_params(params)
     passed: List[Dict[str, Any]] = []
     for c in candidates:
         ctx = c.get("ctx") or {}
@@ -695,12 +731,36 @@ def apply_homeostat(program: HomeostatProgram, candidates: List[Dict[str, Any]])
     out: List[Dict[str, Any]] = []
     for c in active:
         ctx = c.get("ctx") or {}
-        penalty_score = sum(w.weight for w in program.penalties if eval_expr(w.expr, ctx))
-        prefer_bonus = sum(w.weight for w in program.prefers if eval_expr(w.expr, ctx))
+        penalty_score = 0
+        for w in program.penalties:
+            if not eval_expr(w.expr, ctx):
+                continue
+            mult = hp["penalty_scale"]
+            if _expr_is_pred(w.expr, "annoyance", "=", "high"):
+                mult *= hp["annoyance_penalty_mult"]
+            elif _expr_is_pred(w.expr, "drift", "=", "high"):
+                mult *= hp["drift_penalty_mult"]
+            elif _expr_is_pred(w.expr, "progress", "=", "down"):
+                mult *= hp["progress_down_penalty_mult"]
+            penalty_score += int(round(float(w.weight) * mult))
+
+        prefer_bonus = 0
+        for w in program.prefers:
+            if not eval_expr(w.expr, ctx):
+                continue
+            mult = hp["prefer_scale"]
+            if _expr_is_pred(w.expr, "slack", "in", ["ok", "high"]):
+                mult *= hp["slack_prefer_mult"]
+            elif _expr_is_pred(w.expr, "recovery", "in", ["fast", "instant"]):
+                mult *= hp["recovery_prefer_mult"]
+            elif _expr_is_pred(w.expr, "stability", "in", ["steady", "stable"]):
+                mult *= hp["stability_prefer_mult"]
+            prefer_bonus += int(round(float(w.weight) * mult))
         c2 = dict(c)
         c2["homeostat_penalty"] = int(penalty_score)
         c2["homeostat_bonus"] = int(prefer_bonus)
         c2["homeostat_score"] = int(penalty_score - prefer_bonus)
+        c2["homeostat_params"] = hp
         out.append(c2)
     return out
 
@@ -764,6 +824,7 @@ class ProkState:
     genome: Dict[str, Any] = None
     fitness_path: Optional[str] = None
     homeostat_path: Optional[str] = None
+    homeostat_params: Dict[str, float] = None
     nk_state: Dict[str, Any] = None
 
     # Domain recursion
@@ -788,6 +849,9 @@ def _init_defaults(st: ProkState) -> None:
     if st.datetime_blackouts is None: st.datetime_blackouts = []
     if st.tasks is None: st.tasks = []
     if st.genome is None: st.genome = default_genome()
+    if st.homeostat_params is None:
+        st.homeostat_params = default_homeostat_params()
+    st.homeostat_params = _normalize_homeostat_params(st.homeostat_params)
     if "version" not in st.genome: st.genome = default_genome()
     if st.nk_state is None: st.nk_state = default_nk_state()
     if not isinstance(st.nk_state, dict): st.nk_state = default_nk_state()
@@ -954,6 +1018,7 @@ def load_state() -> ProkState:
         genome=(data.get("genome") or None),
         fitness_path=data.get("fitness_path"),
         homeostat_path=data.get("homeostat_path"),
+        homeostat_params=(data.get("homeostat_params") or None),
         nk_state=(data.get("nk_state") or None),
         domains=_load_domains(data),
         participant_id=_to_str(data.get("participant_id"), ""),
@@ -2167,7 +2232,7 @@ def select_recovery_with_trace(
     hprog = homeostat_program or load_homeostat_program(st) or built_in_homeostat()
 
     candidates = build_recovery_candidates(st, task=task, label=label, trigger=trigger, check_gaps=check_gaps)
-    h_candidates = apply_homeostat(hprog, candidates)
+    h_candidates = apply_homeostat(hprog, candidates, params=st.homeostat_params)
     fit_scored = rank_candidates_scored(prog, h_candidates)
     fit_lex = {c["name"]: lex for lex, c in fit_scored}
     ranked = sorted(
@@ -2318,6 +2383,12 @@ def _nk_gene_space() -> Dict[str, List[Any]]:
         "g8_replan_threshold": [0, 1, 2],
         "g9_pause_policy": ["soft", "hard"],
         "g10_explore": ["off", "low", "med", "high"],
+        # Homeostat knobs (structural requires are fixed).
+        "h1_penalty_scale": [0.5, 1.0, 1.5, 2.0],
+        "h2_prefer_scale": [0.5, 1.0, 1.5, 2.0],
+        "h3_annoyance_penalty_mult": [0.5, 1.0, 1.5, 2.0],
+        "h4_drift_penalty_mult": [0.5, 1.0, 1.5, 2.0],
+        "h5_recovery_prefer_mult": [0.5, 1.0, 1.5, 2.0],
     }
 
 def _preset_g1(name: str) -> Dict[str, int]:
@@ -2360,6 +2431,18 @@ def _genotype_from_genome(genome: Dict[str, Any]) -> Dict[str, Any]:
             break
     return gp
 
+def _genotype_from_state(st: ProkState) -> Dict[str, Any]:
+    gp = _genotype_from_genome(st.genome)
+    hp = _normalize_homeostat_params(st.homeostat_params)
+    gp.update({
+        "h1_penalty_scale": float(hp["penalty_scale"]),
+        "h2_prefer_scale": float(hp["prefer_scale"]),
+        "h3_annoyance_penalty_mult": float(hp["annoyance_penalty_mult"]),
+        "h4_drift_penalty_mult": float(hp["drift_penalty_mult"]),
+        "h5_recovery_prefer_mult": float(hp["recovery_prefer_mult"]),
+    })
+    return gp
+
 def _genome_from_genotype(genotype: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any]:
     out = copy.deepcopy(base or default_genome())
     out["g1_block_map"] = _preset_g1(str(genotype.get("g1_profile") or "balanced"))
@@ -2373,6 +2456,19 @@ def _genome_from_genotype(genotype: Dict[str, Any], base: Dict[str, Any]) -> Dic
     out["g9_pause_policy"] = str(genotype.get("g9_pause_policy") or out.get("g9_pause_policy") or "soft")
     out["g10_explore"] = str(genotype.get("g10_explore") or out.get("g10_explore") or "off")
     return out
+
+def _homeostat_params_from_genotype(genotype: Dict[str, Any], base: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    hp = _normalize_homeostat_params(base)
+    hp["penalty_scale"] = max(0.2, min(3.0, _to_float(genotype.get("h1_penalty_scale"), hp["penalty_scale"])))
+    hp["prefer_scale"] = max(0.2, min(3.0, _to_float(genotype.get("h2_prefer_scale"), hp["prefer_scale"])))
+    hp["annoyance_penalty_mult"] = max(0.2, min(3.0, _to_float(genotype.get("h3_annoyance_penalty_mult"), hp["annoyance_penalty_mult"])))
+    hp["drift_penalty_mult"] = max(0.2, min(3.0, _to_float(genotype.get("h4_drift_penalty_mult"), hp["drift_penalty_mult"])))
+    hp["recovery_prefer_mult"] = max(0.2, min(3.0, _to_float(genotype.get("h5_recovery_prefer_mult"), hp["recovery_prefer_mult"])))
+    return hp
+
+def _apply_genotype_to_state(st: ProkState, genotype: Dict[str, Any]) -> None:
+    st.genome = _genome_from_genotype(genotype, st.genome)
+    st.homeostat_params = _homeostat_params_from_genotype(genotype, st.homeostat_params)
 
 def _nk_mutation_neighbors(genotype: Dict[str, Any]) -> List[Dict[str, Any]]:
     space = _nk_gene_space()
@@ -2431,7 +2527,7 @@ def nk_select_genome(st: ProkState) -> None:
         nk["last_source"] = "disabled"
         st.nk_state = nk
         return
-    base_geno = _genotype_from_genome(st.genome)
+    base_geno = _genotype_from_state(st)
     candidates = [base_geno] + _nk_mutation_neighbors(base_geno)
     scored = [(g, _nk_estimate(st, g)) for g in candidates]
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -2444,7 +2540,7 @@ def nk_select_genome(st: ProkState) -> None:
     else:
         chosen = scored[0][0]
         source = "exploit"
-    st.genome = _genome_from_genotype(chosen, st.genome)
+    _apply_genotype_to_state(st, chosen)
     nk["last_genotype"] = chosen
     nk["last_source"] = source
     nk["last_pred_score"] = round(_nk_estimate(st, chosen), 4)
@@ -2460,7 +2556,7 @@ def nk_record_outcome(
     task: Task,
 ) -> None:
     nk = st.nk_state or default_nk_state()
-    geno = nk.get("last_genotype") or _genotype_from_genome(st.genome)
+    geno = nk.get("last_genotype") or _genotype_from_state(st)
     main = nk.setdefault("main", {})
     pair = nk.setdefault("pair", {})
     neighbors = nk.get("neighbors") or default_nk_state()["neighbors"]
@@ -2610,6 +2706,7 @@ def run_session(
         "slack": task_slack_blocks(st, task),
         "goal_profile": st.goal_profile,
         "genome": st.genome,
+        "homeostat_params": st.homeostat_params,
         "nk_source": (st.nk_state or {}).get("last_source"),
         "nk_pred_score": (st.nk_state or {}).get("last_pred_score"),
         "nk_genotype": (st.nk_state or {}).get("last_genotype"),
@@ -2774,6 +2871,7 @@ def run_session(
             "homeostat_score": best.get("homeostat_score"),
             "homeostat_penalty": best.get("homeostat_penalty"),
             "homeostat_bonus": best.get("homeostat_bonus"),
+            "homeostat_params": st.homeostat_params,
             "homeostat_ctx": best.get("ctx"),
             "phenom_mode": phenom_mode,
             "phenom_score": phenom_score,
@@ -2947,6 +3045,19 @@ def run_session(
         quit_early=quit_early,
         task=task,
     )
+    step = ultrastable_step_mechanism(
+        st=st,
+        task=task,
+        planned_minutes=block_minutes,
+        minutes_worked=minutes_worked,
+        drift_events=drift_events,
+        quit_early=quit_early,
+    )
+    if step:
+        print(
+            "ULTRASTABLE STEP: essential-variable guard triggered; "
+            "mutated NK+homeostat policy for next run."
+        )
     save_state(st)
 
 # ----------------------------
@@ -3353,6 +3464,104 @@ def forecast_risk_map(st: ProkState, horizon_days: int = 14) -> List[Dict[str, A
     out.sort(key=lambda r: (not r["within_horizon"], -r["risk_p"], r["slack_blocks"], r["days_left"]))
     return out
 
+def essential_variable_violations(st: ProkState, task: Optional[Task] = None) -> List[str]:
+    viol: List[str] = []
+    level, reasons = compute_alarm(st)
+    if level == "critical":
+        viol.extend(reasons[:6])
+    t = task
+    if t is not None:
+        if t.deadline and task_slack_blocks(st, t) < 0:
+            viol.append(f"task_deadline_violation:{t.id}")
+        if _to_int(t.recent_drift_count, 0) >= 4:
+            viol.append(f"task_drift_cluster:{t.id}")
+    return viol
+
+def ashby_variety_profile(records: List[Dict[str, Any]], days: int = 30) -> Dict[str, Any]:
+    cutoff = _today() - dt.timedelta(days=max(1, _to_int(days, 30)))
+    disturbances: Counter[str] = Counter()
+    responses: Counter[str] = Counter()
+    for r in records:
+        ts = str(r.get("ts") or "")
+        if len(ts) < 10:
+            continue
+        try:
+            d = dt.date.fromisoformat(ts[:10])
+        except Exception:
+            continue
+        if d < cutoff:
+            continue
+        if str(r.get("kind")) == "course_correct":
+            domain = str(r.get("domain") or "?")
+            label = str(r.get("label") or "?")
+            trigger = str(r.get("trigger") or "?")
+            disturbances[f"{domain}|{label}|{trigger}"] += 1
+            chosen = str(r.get("chosen") or "")
+            if chosen:
+                responses[chosen] += 1
+    du = len(disturbances)
+    ru = len(responses)
+    # Practical requisite-variety condition under finite action alphabet:
+    # controller variety should at least cover observed disturbance classes up to available action repertoire.
+    target = min(max(1, ru if ru > 0 else 1), max(1, du))
+    pass_var = (ru >= min(du, 4)) if du > 0 else True
+    return {
+        "disturbance_unique": du,
+        "response_unique": ru,
+        "disturbances_top": disturbances.most_common(6),
+        "responses_top": responses.most_common(6),
+        "target": target,
+        "pass": pass_var,
+    }
+
+def ultrastable_step_mechanism(
+    st: ProkState,
+    task: Task,
+    planned_minutes: int,
+    minutes_worked: int,
+    drift_events: int,
+    quit_early: bool,
+) -> Optional[Dict[str, Any]]:
+    viol = essential_variable_violations(st, task)
+    low_progress = minutes_worked < max(5, int(round(0.25 * float(max(1, planned_minutes)))))
+    trigger = bool(viol) or (drift_events >= 3 and (quit_early or low_progress))
+    if not trigger:
+        return None
+
+    base = _genotype_from_state(st)
+    neigh = _nk_mutation_neighbors(base)
+    if not neigh:
+        return None
+    chosen = random.choice(neigh)
+    _apply_genotype_to_state(st, chosen)
+
+    nk = st.nk_state or default_nk_state()
+    nk["last_genotype"] = chosen
+    nk["last_source"] = "ultrastable_step"
+    nk["last_pred_score"] = round(_nk_estimate(st, chosen), 4)
+    st.nk_state = nk
+
+    rec = {
+        "triggered": True,
+        "reasons": viol if viol else ["drift_cluster_low_progress"],
+        "chosen": chosen,
+        "pred_score": nk["last_pred_score"],
+    }
+    _log_event("ultrastable_step", {
+        "participant_id": st.participant_id,
+        "task_id": task.id,
+        "task_name": task.name,
+        "domain": task.domain,
+        "planned_minutes": planned_minutes,
+        "minutes_worked": minutes_worked,
+        "drift_events": drift_events,
+        "quit_early": quit_early,
+        "reasons": rec["reasons"],
+        "nk_genotype": chosen,
+        "homeostat_params": st.homeostat_params,
+    })
+    return rec
+
 def constitutional_checks(st: ProkState, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     checks = []
     level, _ = compute_alarm(st)
@@ -3365,6 +3574,18 @@ def constitutional_checks(st: ProkState, records: List[Dict[str, Any]]) -> List[
     checks.append({"id": "system2_enabled", "pass": bool(s2.get("enabled", True)), "detail": f"system2={bool(s2.get('enabled', True))}"})
     ph = st.phenomenology or {}
     checks.append({"id": "phenom_bounded", "pass": bool(ph.get("enabled", True)), "detail": f"mode={ph.get('mode')} topK=3"})
+    vp = ashby_variety_profile(records, days=30)
+    checks.append({
+        "id": "requisite_variety",
+        "pass": bool(vp["pass"]),
+        "detail": f"disturbance_unique={vp['disturbance_unique']} response_unique={vp['response_unique']}",
+    })
+    ev = essential_variable_violations(st, None)
+    checks.append({
+        "id": "essential_variables",
+        "pass": (len(ev) == 0),
+        "detail": "ok" if not ev else "; ".join(ev[:3]),
+    })
     return checks
 
 def _ics_unfold_lines(text: str) -> List[str]:
@@ -3883,6 +4104,7 @@ def cmd_status(args) -> None:
     print(f"  genome.explore: {st.genome.get('g10_explore')}")
     print(f"  fitness_path: {st.fitness_path or '(none)'}")
     print(f"  homeostat_path: {st.homeostat_path or '(none)'}")
+    print(f"  homeostat_params: {st.homeostat_params}")
     print(f"  goal_profile: {st.goal_profile}")
     print(f"  policy_constraints: {st.policy_constraints}")
     skip = check_skip_summary(recs, days=14)
@@ -4344,7 +4566,10 @@ def cmd_fitness(args) -> None:
 def cmd_homeostat(args) -> None:
     st = load_state(); ensure_today(st); _init_defaults(st)
     if args.action == "show":
-        print(st.homeostat_path or "(none)")
+        print(_json_dump({
+            "homeostat_path": st.homeostat_path or "(none)",
+            "homeostat_params": st.homeostat_params,
+        }))
         return
     if args.action == "write-default":
         out = Path(args.out or "homeostat.default.prokfit")
@@ -4374,6 +4599,7 @@ def cmd_nk(args) -> None:
             "history_n": len(history),
             "recent_utility_avg": _safe_avg(utils),
             "last_genotype": nk.get("last_genotype") or {},
+            "homeostat_params": st.homeostat_params,
         }))
         return
     if args.action == "set":

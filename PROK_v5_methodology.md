@@ -19,6 +19,11 @@ Build a justified, finite set of:
 - **Transforms/strategies 𝒜**: micro-interventions that move users back toward engagement
 - **Genes**: discrete controller parameters (policy knobs) that determine how regulation is applied
 
+Operationalization in runtime:
+- track disturbance-class variety from logs,
+- track response-action variety from applied recoveries,
+- enforce periodic audit that controller variety does not collapse below disturbance variety.
+
 ### A2 — Build and validate a Regulatory Calibration Questionnaire (RCQ)
 Create a questionnaire that estimates:
 - disturbance profile (trigger exposure),
@@ -54,6 +59,11 @@ PROK v5 implements an Ashby regulator loop:
 - **Observation**: self-reports (d/p/b/e), optional micro-ratings (burden/helpfulness), context tags
 - **Regulator**: selects transforms 𝒜 and adapts policy “genes” over time
 - **Goal/fitness model ρ**: user priorities affect action ranking (without changing the core measurable outcomes)
+
+Design-for-a-Brain compliance commitments:
+- **Essential variables explicitly monitored** (feasibility/drift boundaries),
+- **Requisite variety diagnostics** in constitutional checks,
+- **Ultrastable step mechanism** (bounded NK mutation) when essential variables are threatened.
 
 ### Three-layer architecture (big-picture framing)
 PROK v5 should be analyzed as three coupled layers:

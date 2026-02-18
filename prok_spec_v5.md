@@ -364,10 +364,11 @@ Interpretation:
 DISTURBANCE/EPISODE
   -> state update (TMT/drift/slack/alarm)
   -> gene-policy candidate generation
-  -> homeostat engine (require/veto + penalty/prefer score)
-  -> fitness+goals ranking (inside homeostat-feasible set)
-  -> phenomenology signature check
-       if n>=n_min and score>=tau: re-rank within top-K
+  -> safety officer gate: homeostat hard checks (require/veto)
+  -> S5 policy steward gate: fitness+goals doctrine over safe set
+  -> phenomenology signature check (memory gate)
+       if n>=n_min and score>=tau: re-rank within policy-approved top-K
+  -> captain authorization of selected safe action
   -> execute action (+ tighten checks / replan)
   -> log outcome
   -> update phenomenology memory (mid loop)
@@ -376,23 +377,120 @@ DISTURBANCE/EPISODE
 
 ### 9.3 Sailor analogy (operational mental model)
 ```text
-Watchman spots trouble
-  -> Navigator checks charts (feasibility/route)
-  -> Engine room exposes possible maneuvers (genes)
-  -> Safety officer blocks dangerous moves (homeostat)
-  -> First Mate ranks remaining maneuvers (fitness+goals)
-  -> Old Sailor checks logbook of similar seas (phenomenology)
-       computes one scalar per maneuver:
-         phi = p_viable - lambda_procrast*p_procrast - mu_overcontrol*p_overcontrol
-         with lambda_procrast > mu_overcontrol
-       if enough evidence and phi exceeds threshold: refine choice within approved maneuvers
-  -> Crew executes
-  -> Watch Coordinator synchronizes stations (System 2 damping)
-       prevents harmful thrashing between stations,
-       enforces rhythm/protocol constraints for stable coordination
-  -> Logkeeper records outcome
-  -> Old Sailor updates logbook; Captain updates doctrine over time (NK tuning)
+SHIP CREW (Diagram)
+────────────────────────────────────────────────────────────────────
+[Storm hits]
+     |
+     v
+[Lookout names the trouble]
+     |
+     v
+[Quartermaster: no thrashing]
+     |
+     +----------------------+
+     |                      |
+     v                      v
+[Duty Officer: today]   [Route Officer: long path]
+     \                      /
+      \                    /
+       +------>[Crew proposes moves]------+
+                                           |
+                                           v
+                    [Safety Officer: hard safety checks]
+                    - no dangerous move
+                    - no too-slow urgent response
+                                           |
+                                           v
+             [Policy Steward (S5): mission values + doctrine]
+                                           |
+                                           v
+                         [First Mate ranks safe moves]
+                                           |
+                                           v
+              [Old Sailor checks journal, refines safely]
+                                           |
+                                           v
+                              [Captain authorizes execution]
+                                           |
+                                           v
+                                   [Crew executes move]
+                                           |
+                                           v
+                                       [Write to log]
+                                           |
+                                           v
+       [Chief Engineer tunes setup + preference strengths over voyages]
+                                           |
+                                           v
+                    [Emergency reset if limits are crossed]
+
+MODEL (Diagram)
+────────────────────────────────────────────────────────────────────
+[Disturbance/context]
+        |
+        v
+[Observed trouble class]
+        |
+        v
+[S1 operations]
+        |
+        v
+[S2 coordination: prevent thrashing]
+        |
+        +------------------+
+        |                  |
+        v                  v
+[S3 today control]   [S4 horizon control]
+        \                  /
+         \                /
+          +------>[Candidate actions]------+
+                                           |
+                                           v
+                      [Homeostat hard safety checks]
+                      - forbid unsafe actions
+                      - forbid too-slow urgent actions
+                                           |
+                                           v
+              [S5 policy values: fitness priorities + doctrine]
+                                           |
+                                           v
+                        [Baseline safe ranking]
+                                           |
+                                           v
+                 [Memory refinement within safe options]
+                                           |
+                                           v
+                           [Execution authorization]
+                                           |
+                                           v
+                               [Execute chosen action]
+                                           |
+                                           v
+                                [Log outcome + context]
+                                           |
+                                           v
+          [NK tunes machine knobs + soft preference strengths]
+                                           |
+                                           v
+                 [Ultrastable reset on boundary breach]
+
+ISOMORPHIC MAP (Crew -> Model)
+────────────────────────────────────────────────────────────────────
+Lookout -> observed trouble class
+Quartermaster -> S2 coordination
+Duty Officer -> S3 today control
+Route Officer -> S4 horizon control
+Safety Officer -> homeostat hard checks
+Policy Steward (S5) -> fitness values + doctrine
+First Mate -> baseline ranking
+Old Sailor journal -> memory refinement within safe set
+Captain -> execution authority
+Chief Engineer -> NK slow tuning
+Emergency reset -> ultrastable step
 ```
+
+Story:
+A storm hits. The lookout names the kind of trouble. The crew gets to work. The Quartermaster keeps the crew from wasting time by jumping between jobs every minute. The Duty Officer decides what must be done today with the hours you actually have. The Route Officer checks the longer path and asks if the ship still arrives on time. The crew proposes moves. The Safety Officer applies hard checks and removes unsafe moves. The Policy Steward (S5) applies mission values and doctrine. The First Mate ranks the safe moves. Then the Old Sailor checks the journal of similar storms and may suggest a better safe move; forbidden moves remain forbidden. The Captain authorizes execution. The crew executes and writes what happened in the log. Over many voyages, the Chief Engineer tunes setup and preference strengths. If danger limits are crossed, they do an emergency reset and continue.
 
 Interpretation of the Old Sailor's scalar:
 - `p_viable`: empirical proxy that maneuver restores viable engagement
@@ -548,6 +646,14 @@ Unequal-mean guidance (default):
 Integration:
 - The homeostat score is applied **before** fitness-DSL ranking.
 - NK exploration minimizes homeostat violations/penalties when selecting genomes.
+- NK operates on a **joint genotype**: machine genes (`g1..g10`) + tunable homeostat multipliers.
+- Structural homeostat `require` constraints remain constitutional (not removed by NK); only bounded weights are tunable.
+
+### 10.6 Design-for-a-Brain compliance (runtime)
+Explicit Ashby mechanisms in runtime:
+- **Essential-variable guard**: feasibility/drift boundaries are monitored as constitutional variables.
+- **Requisite-variety audit**: `constitution check` reports disturbance-class vs response-class variety from logs.
+- **Ultrastable step mechanism**: when essential variables are threatened (or repeated drift + low progress), runtime performs a bounded NK mutation over machine + homeostat knobs for the next run.
 
 ---
 
